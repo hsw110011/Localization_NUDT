@@ -1,0 +1,28 @@
+input_topic: "/cloud_registered"
+output_topic: "/lidar_bev/grid_map"
+frame_id: "body"
+
+resolution: 0.2
+map_size_x: 100.0
+map_size_y: 100.0
+point_min_z: -10.0
+point_max_z: 200.0
+update_rate_hz: 10.0
+
+ego_filter_enabled: true
+ego_box_min_x: -3.0
+ego_box_max_x: 1.0
+ego_box_min_y: -1.0
+ego_box_max_y: 1.0
+
+height_quantile: 0.90
+accumulation_frame_count: 5
+count_saturation: 20
+distance_decay_alpha: 0.03
+
+edge_gradient_threshold: 2.0
+edge_min_height: 0.5
+edge_min_jump: 0.5
+edge_min_valid_neighbors: 3
+
+show_windows: false
