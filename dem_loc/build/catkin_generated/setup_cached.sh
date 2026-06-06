@@ -8,8 +8,8 @@
 
 # modified environment variables
 export CMAKE_PREFIX_PATH="/home/hsw/catkin_ws/program/dem_loc/build/devel:$CMAKE_PREFIX_PATH"
-export LD_LIBRARY_PATH='/home/hsw/catkin_ws/program/dem_loc/build/devel/lib:/home/hsw/catkin_ws/devel/lib:/opt/ros/noetic/lib:/opt/Qt5.14.2/5.14.2/gcc_64/lib:/usr/local/cuda-12.6/lib64'
-export PATH='/opt/ros/noetic/bin:/home/hsw/.local/bin:/home/hsw/.codex/tmp/arg0/codex-arg0Fusn1z:/home/hsw/.local/bin:/home/hsw/.npm-global/bin:/home/hsw/.npm-global/bin:/usr/local/bin:/opt/Qt5.14.2/5.14.2/gcc_64/bin:/usr/local/cuda-12.6/bin:/home/hsw/miniconda3/condabin:/home/hsw/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/hsw/.vscode/extensions/openai.chatgpt-26.519.32039-linux-x64/bin/linux-x86_64'
+export LD_LIBRARY_PATH='/home/hsw/catkin_ws/program/dem_loc/build/devel/lib:/home/hsw/catkin_ws/devel/lib:/opt/ros/noetic/lib:/opt/Qt5.14.2/5.14.2/gcc_64/lib:/usr/local/cuda-12.6/lib64:/opt/Qt5.14.2/5.14.2/gcc_64/lib:/usr/local/cuda-12.6/lib64'
+export PATH='/opt/ros/noetic/bin:/home/hsw/.local/bin:/home/hsw/.npm-global/bin:/home/hsw/.npm-global/bin:/usr/local/bin:/opt/Qt5.14.2/5.14.2/gcc_64/bin:/usr/local/cuda-12.6/bin:/usr/share/cursor/resources/app/resources/helpers:/home/hsw/.local/bin:/home/hsw/.npm-global/bin:/home/hsw/.npm-global/bin:/usr/local/bin:/opt/Qt5.14.2/5.14.2/gcc_64/bin:/usr/local/cuda-12.6/bin:/home/hsw/miniconda3/condabin:/home/hsw/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'
 export PKG_CONFIG_PATH="/home/hsw/catkin_ws/program/dem_loc/build/devel/lib/pkgconfig:$PKG_CONFIG_PATH"
 export PYTHONPATH="/home/hsw/catkin_ws/program/dem_loc/build/devel/lib/python3/dist-packages:$PYTHONPATH"
 export ROSLISP_PACKAGE_DIRECTORIES="/home/hsw/catkin_ws/program/dem_loc/build/devel/share/common-lisp:$ROSLISP_PACKAGE_DIRECTORIES"

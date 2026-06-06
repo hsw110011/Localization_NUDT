@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Python port of localization.cpp with TerrainMap roughness DEM ZNCC."""
+"""Python DSM crop/visualization node."""
 
 import os
 import sys
 import time
-import csv
+import warnings
 
 _PYTHON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python"))
 if _PYTHON_DIR not in sys.path:
@@ -18,21 +18,22 @@ from loc_bev.cinterface import CInterface
 from loc_bev.common_struct import InputData
 from loc_bev.coord_converter import CoordConverter
 from loc_bev.dem_tool import load_dem_tiff, normalize_to_uint8
-from loc_bev.dem_zncc import (
-    dem_patch_to_compare_image,
-    normalize_for_display,
-    sample_dem_patch,
-    sample_dem_patch_crop_rotate,
-    terrain_array_to_grid,
-    zncc,
-)
+from loc_bev.dem_zncc import sample_dem_patch, sample_dem_patch_crop_rotate
 
 
 def _make_dem_color_map(dem_data):
     gray_map = normalize_to_uint8(
         dem_data.raw_elevation_map, dem_data.min_height, dem_data.max_height
     )
-    return cv2.applyColorMap(gray_map, cv2.COLORMAP_HOT)
+    return _apply_bev_colormap(gray_map)
+
+
+def _bev_colormap_id():
+    return getattr(cv2, "COLORMAP_VIRIDIS", cv2.COLORMAP_JET)
+
+
+def _apply_bev_colormap(gray_u8):
+    return cv2.applyColorMap(gray_u8.astype(np.uint8), _bev_colormap_id())
 
 
 def _draw_track(vis_track, pixel, color=(255, 255, 255), previous=None):
@@ -54,27 +55,41 @@ def _create_resizable_window(name, width, height):
     cv2.resizeWindow(name, int(width), int(height))
 
 
-def _stack_debug_images(roughness_grid, dem_compare, valid_mask):
-    rough_u8 = roughness_grid.astype(np.uint8)
-    dem_u8 = normalize_for_display(dem_compare)
+def _read_key_value_ini(path):
+    values = {}
+    if not path or not os.path.exists(path):
+        return values
 
-    valid_u8 = np.where(valid_mask, 255, 0).astype(np.uint8)
-    rough_color = cv2.applyColorMap(rough_u8, cv2.COLORMAP_JET)
-    dem_color = cv2.applyColorMap(dem_u8, cv2.COLORMAP_JET)
-    valid_color = cv2.cvtColor(valid_u8, cv2.COLOR_GRAY2BGR)
-    return np.hstack([rough_color, dem_color, valid_color])
+    with open(path, "r", encoding="utf-8") as fin:
+        for raw_line in fin:
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                values[parts[0]] = parts[1]
+    return values
 
 
-def _gradient_magnitude(image):
-    data = np.asarray(image, dtype=np.float32)
-    finite = np.isfinite(data)
-    if finite.any():
-        data = np.where(finite, data, float(np.nanmean(data))).astype(np.float32)
-    else:
-        data = np.zeros(data.shape, dtype=np.float32)
-    grad_x = cv2.Sobel(data, cv2.CV_32F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(data, cv2.CV_32F, 0, 1, ksize=3)
-    return cv2.magnitude(grad_x, grad_y)
+def _config_float(values, key, fallback):
+    try:
+        return float(values.get(key, fallback))
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def _config_int(values, key, fallback):
+    try:
+        return int(round(float(values.get(key, fallback))))
+    except (TypeError, ValueError):
+        return int(fallback)
+
+
+def _param_bool(name, default):
+    value = rospy.get_param("~" + name, default)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off", "")
+    return bool(value)
 
 
 def _robust_normalize(image, mask, lower_percentile, upper_percentile):
@@ -97,62 +112,155 @@ def _robust_normalize(image, mask, lower_percentile, upper_percentile):
     return np.clip(out, 0.0, 255.0).astype(np.float32)
 
 
-def _edge_iou(image_a, image_b, mask, percentile):
-    valid = np.asarray(mask, dtype=bool) & np.isfinite(image_a) & np.isfinite(image_b)
-    if np.count_nonzero(valid) < 2:
-        return float("nan")
+def _relative_height_from_radius(dsm_patch, valid_mask, resolution, radius_m):
+    patch = np.asarray(dsm_patch, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(patch)
+    if not np.any(valid):
+        return np.full(patch.shape, np.nan, dtype=np.float32), float("nan"), 0
 
-    values_a = image_a[valid]
-    values_b = image_b[valid]
-    threshold_a = float(np.percentile(values_a, percentile))
-    threshold_b = float(np.percentile(values_b, percentile))
-    edge_a = valid & (image_a >= threshold_a)
-    edge_b = valid & (image_b >= threshold_b)
-    union = int(np.count_nonzero(edge_a | edge_b))
-    if union == 0:
-        return float("nan")
-    return float(np.count_nonzero(edge_a & edge_b)) / float(union)
+    row_idx, col_idx = np.indices(patch.shape, dtype=np.float32)
+    center_r = patch.shape[0] / 2.0
+    center_c = patch.shape[1] / 2.0
+    dx = (row_idx - center_r) * float(resolution)
+    dy = (col_idx - center_c) * float(resolution)
+    radius_sq = float(radius_m) * float(radius_m)
+    reference_mask = valid & (dx * dx + dy * dy <= radius_sq)
+
+    reference_count = int(np.count_nonzero(reference_mask))
+    if reference_count > 0:
+        reference_height = float(np.mean(patch[reference_mask]))
+    else:
+        center_value = patch[int(center_r), int(center_c)]
+        reference_height = (
+            float(center_value) if np.isfinite(center_value) else float(np.nanmean(patch[valid]))
+        )
+
+    relative = patch - reference_height
+    relative = np.where(valid, relative, np.nan).astype(np.float32)
+    return relative, reference_height, reference_count
 
 
-def _finite_or(value, fallback=0.0):
-    if np.isfinite(value):
-        return float(value)
-    return float(fallback)
+def _median_smooth_valid(image, valid_mask, min_valid_neighbors):
+    data = np.asarray(image, dtype=np.float32)
+    valid = np.asarray(valid_mask, dtype=bool) & np.isfinite(data)
+    rows, cols = data.shape
+    if rows == 0 or cols == 0:
+        return data.copy(), valid.copy()
+
+    padded_data = np.pad(data, ((1, 1), (1, 1)), mode="constant", constant_values=np.nan)
+    padded_valid = np.pad(valid, ((1, 1), (1, 1)), mode="constant", constant_values=False)
+    data_windows = np.lib.stride_tricks.sliding_window_view(padded_data, (3, 3))
+    valid_windows = np.lib.stride_tricks.sliding_window_view(padded_valid, (3, 3))
+    window_values = np.where(valid_windows, data_windows, np.nan)
+    valid_count = np.sum(valid_windows, axis=(2, 3))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        smoothed = np.nanmedian(window_values, axis=(2, 3)).astype(np.float32)
+    smoothed_valid = valid_count >= int(min_valid_neighbors)
+    smoothed = np.where(smoothed_valid, smoothed, np.nan).astype(np.float32)
+    return smoothed, smoothed_valid
+
+
+def _bev_style_gradients(relative_height, valid_mask, resolution, min_valid_neighbors):
+    smoothed, smoothed_valid = _median_smooth_valid(
+        relative_height, valid_mask, min_valid_neighbors
+    )
+    if not np.any(smoothed_valid):
+        zeros = np.zeros(relative_height.shape, dtype=np.float32)
+        return zeros, zeros
+
+    fill_value = float(np.nanmean(smoothed[smoothed_valid]))
+    filled = np.where(smoothed_valid, smoothed, fill_value).astype(np.float32)
+    scale = 8.0 * max(float(resolution), 1e-6)
+    grad_col = cv2.Sobel(filled, cv2.CV_32F, 1, 0, ksize=3) / scale
+    grad_row = cv2.Sobel(filled, cv2.CV_32F, 0, 1, ksize=3) / scale
+    longitudinal_gradient = np.where(smoothed_valid, -grad_row, 0.0).astype(np.float32)
+    lateral_gradient = np.where(smoothed_valid, -grad_col, 0.0).astype(np.float32)
+    return longitudinal_gradient, lateral_gradient
+
+
+def _colorize_masked(image, mask, lower_percentile, upper_percentile):
+    normalized = _robust_normalize(image, mask, lower_percentile, upper_percentile)
+    color = _apply_bev_colormap(normalized)
+    color[~np.asarray(mask, dtype=bool)] = (0, 0, 0)
+    return color
+
+
+def _stack_dsm_debug_images(dsm_products, lower_percentile, upper_percentile):
+    valid = dsm_products["valid_mask"]
+    height_color = _colorize_masked(
+        dsm_products["relative_height"], valid, lower_percentile, upper_percentile
+    )
+    longitudinal_color = _colorize_masked(
+        dsm_products["longitudinal_gradient"], valid, lower_percentile, upper_percentile
+    )
+    lateral_color = _colorize_masked(
+        dsm_products["lateral_gradient"], valid, lower_percentile, upper_percentile
+    )
+    return np.hstack([height_color, longitudinal_color, lateral_color])
 
 
 class PythonLocalizationNode(object):
     def __init__(self):
+        self.gridmap_init_path = rospy.get_param(
+            "~gridmap_init_path",
+            "/home/hsw/catkin_ws/program/GridMap_v7_5_ros1/config/GridMapInit.ini",
+        )
+        self.gridmap_config = _read_key_value_ini(self.gridmap_init_path)
+        if self.gridmap_config:
+            rospy.loginfo("Loaded GridMap defaults: %s", self.gridmap_init_path)
+        else:
+            rospy.logwarn("GridMapInit.ini defaults not found: %s", self.gridmap_init_path)
+
+        default_resolution = _config_float(
+            self.gridmap_config, "lidar_bev_resolution", 0.2
+        )
+        default_map_size_x = _config_float(
+            self.gridmap_config, "lidar_bev_map_size_x", 100.0
+        )
+        default_map_size_y = _config_float(
+            self.gridmap_config, "lidar_bev_map_size_y", 100.0
+        )
+
         self.dem_path = rospy.get_param("~dem_path", "/home/hsw/catkin_ws/doc/miluo_dsm.tif")
         self.loop_rate = float(rospy.get_param("~rate", 10.0))
-        self.show_window = bool(rospy.get_param("~show_window", True))
-        self.terrain_resolution = float(rospy.get_param("~terrain_resolution", 0.2))
-        self.roughness_width = int(rospy.get_param("~roughness_width", 500))
-        self.roughness_height = int(rospy.get_param("~roughness_height", 500))
+        self.show_window = _param_bool("show_window", True)
+        self.show_dsm_layers = _param_bool("show_dsm_layers", True)
+        self.terrain_resolution = float(
+            rospy.get_param("~terrain_resolution", default_resolution)
+        )
+        self.patch_width = int(
+            rospy.get_param(
+                "~patch_width",
+                max(1, int(round(default_map_size_y / max(self.terrain_resolution, 1e-6)))),
+            )
+        )
+        self.patch_height = int(
+            rospy.get_param(
+                "~patch_height",
+                max(1, int(round(default_map_size_x / max(self.terrain_resolution, 1e-6)))),
+            )
+        )
         self.heading_source = rospy.get_param("~heading_source", "global_pose")
         self.heading_convention = rospy.get_param("~heading_convention", "auto")
         self.heading_offset_deg = float(rospy.get_param("~heading_offset_deg", 0.0))
-        self.matcher_mode = rospy.get_param("~matcher_mode", "feature")
         self.dem_sampling_mode = rospy.get_param("~dem_sampling_mode", "crop_rotate")
-        self.dem_crop_rotate_expand = bool(rospy.get_param("~dem_crop_rotate_expand", True))
-        self.dem_compare_mode = rospy.get_param("~dem_compare_mode", "local_roughness")
-        self.roughness_scale_m = float(rospy.get_param("~roughness_scale_m", 2.5))
-        self.dem_roughness_window_m = float(rospy.get_param("~dem_roughness_window_m", 1.0))
-        self.mask_zero_roughness = bool(rospy.get_param("~mask_zero_roughness", True))
-        self.roughness_mask_min = float(rospy.get_param("~roughness_mask_min", 5.0))
-        self.roughness_mask_max = float(rospy.get_param("~roughness_mask_max", 255.0))
+        self.dsm_reference_radius_m = float(
+            rospy.get_param(
+                "~dsm_reference_radius_m",
+                _config_float(self.gridmap_config, "lidar_bev_near_inner_radius", 2.0),
+            )
+        )
+        self.dsm_min_valid_neighbors = int(
+            rospy.get_param(
+                "~dsm_min_valid_neighbors",
+                _config_int(self.gridmap_config, "lidar_bev_edge_min_valid_neighbors", 3),
+            )
+        )
+        self.dsm_min_valid_neighbors = max(1, min(9, self.dsm_min_valid_neighbors))
         self.norm_lower_percentile = float(rospy.get_param("~norm_lower_percentile", 2.0))
         self.norm_upper_percentile = float(rospy.get_param("~norm_upper_percentile", 98.0))
-        self.norm_zncc_weight = float(rospy.get_param("~norm_zncc_weight", 0.55))
-        self.gradient_zncc_weight = float(rospy.get_param("~gradient_zncc_weight", 0.45))
-        self.edge_iou_weight = float(rospy.get_param("~edge_iou_weight", 0.0))
-        self.edge_percentile = float(rospy.get_param("~edge_percentile", 85.0))
-        self.min_valid_ratio = float(rospy.get_param("~min_valid_ratio", 0.02))
-        self.score_csv_path = rospy.get_param(
-            "~score_csv_path",
-            "/home/hsw/catkin_ws/program/dem_loc/match_scores.csv",
-        )
-        self.score_csv_append = bool(rospy.get_param("~score_csv_append", False))
-        self.score_csv_every_n = max(1, int(rospy.get_param("~score_csv_every_n", 1)))
         self.print_every_n = max(1, int(rospy.get_param("~print_every_n", 1)))
         self.save_debug_dir = rospy.get_param("~save_debug_dir", "")
         self.save_every_n = int(rospy.get_param("~save_every_n", 0))
@@ -162,7 +270,7 @@ class PythonLocalizationNode(object):
         self.track_window_height = int(rospy.get_param("~track_window_height", 800))
         self.debug_window_width = int(rospy.get_param("~debug_window_width", 1500))
         self.debug_window_height = int(rospy.get_param("~debug_window_height", 500))
-        self.draw_local_pose_track = bool(rospy.get_param("~draw_local_pose_track", True))
+        self.draw_local_pose_track = _param_bool("draw_local_pose_track", True)
         self.local_pose_track_mode = rospy.get_param("~local_pose_track_mode", "anchor")
 
         if self.show_window and os.name != "nt" and not os.environ.get("DISPLAY"):
@@ -191,10 +299,7 @@ class PythonLocalizationNode(object):
         self.local_pose_anchor = None
         self.global_track_point = None
         self.local_track_point = None
-        self.processed_terrain_count = 0
-        self.score_csv_file = None
-        self.score_csv_writer = None
-        self._init_score_csv()
+        self.processed_dsm_count = 0
 
         if self.show_window:
             _create_resizable_window(
@@ -206,11 +311,12 @@ class PythonLocalizationNode(object):
                 "Track", self.track_window_width, self.track_window_height
             )
 
-            _create_resizable_window(
-                "Roughness | DEM | Valid",
-                self.debug_window_width,
-                self.debug_window_height,
-            )
+            if self.show_dsm_layers:
+                _create_resizable_window(
+                    "DSM H_rel | DSM G_long | DSM G_lat",
+                    self.debug_window_width,
+                    self.debug_window_height,
+                )
             cv2.waitKey(1)
 
     def spin(self):
@@ -238,8 +344,6 @@ class PythonLocalizationNode(object):
 
         if self.show_window:
             cv2.destroyAllWindows()
-        if self.score_csv_file is not None:
-            self.score_csv_file.close()
 
     def _handle_global_pose(self, msg):
         self.latest_global_pose = msg
@@ -306,15 +410,9 @@ class PythonLocalizationNode(object):
     def _handle_terrain_map(self, terrain_msg):
         if self.latest_global_pose is None:
             rospy.logwarn_throttle(
-                2.0, "Received TerrainMap but no /self_state/GlobalPose yet; skip ZNCC."
+                2.0, "Received TerrainMap but no /self_state/GlobalPose yet; skip DSM update."
             )
             return
-
-        roughness = terrain_array_to_grid(
-            terrain_msg.roughness,
-            width=self.roughness_width,
-            height=self.roughness_height,
-        )
 
         center_lon = float(self.latest_global_pose.longitude)
         center_lat = float(self.latest_global_pose.latitude)
@@ -327,53 +425,27 @@ class PythonLocalizationNode(object):
         heading += self.heading_offset_deg
         heading_convention = self._resolve_heading_convention()
 
-        match = self._match_same_pose(
-            roughness, center_lon, center_lat, heading, heading_convention
+        dsm_products = self._build_dsm_at_pose(
+            center_lon, center_lat, heading, heading_convention
         )
 
-        dem_compare = match["dem_compare"]
-        valid_dem = match["valid_mask"]
-        score = match["score"]
-        valid_count = match["valid_count"]
-
-        self.processed_terrain_count += 1
-        index = self.processed_terrain_count
-
-        if self.score_csv_writer is not None and index % self.score_csv_every_n == 0:
-            self._write_score_csv_rows(
-                index,
-                terrain_msg,
-                roughness,
-                center_lon,
-                center_lat,
-                heading,
-                heading_convention,
-                match,
-            )
+        self.processed_dsm_count += 1
+        index = self.processed_dsm_count
+        valid_count = int(np.count_nonzero(dsm_products["valid_mask"]))
 
         if index % self.print_every_n == 0:
             pixel = self.coord_converter.wgs84_to_pixel(center_lon, center_lat)
             rospy.loginfo(
                 (
-                    "TerrainMap roughness DEM match #%d: mode=%s/%s, score=%.6f "
-                    "(raw=%.6f, norm=%.6f, grad=%.6f, edge_iou=%.6f), "
-                    "valid=%d/%d, mask=%.2f%%, "
+                    "DSM patch #%d: valid=%d/%d (%.2f%%), "
                     "center_lon=%.9f, center_lat=%.9f, heading=%.3f(%s/%s), "
-                    "terrain_theta=%.3f, global_azimuth=%.3f, "
-                    "sampling=%s, rough_win=%.2fm, norm_p=[%.1f, %.1f], "
-                    "dem_pixel=(%.2f, %.2f), roughness[min=%d max=%d mean=%.3f]"
+                    "terrain_theta=%.3f, global_azimuth=%.3f, sampling=%s, "
+                    "dem_pixel=(%.2f, %.2f), dsm_ref=%.3fm/%dpx"
                 ),
                 index,
-                self.matcher_mode,
-                self.dem_compare_mode,
-                score,
-                match["raw_score"],
-                match["norm_score"],
-                match["gradient_score"],
-                match["edge_iou"],
                 valid_count,
-                roughness.size,
-                100.0 * float(valid_count) / max(float(roughness.size), 1.0),
+                dsm_products["valid_mask"].size,
+                100.0 * float(valid_count) / max(float(dsm_products["valid_mask"].size), 1.0),
                 center_lon,
                 center_lat,
                 heading,
@@ -382,255 +454,93 @@ class PythonLocalizationNode(object):
                 terrain_heading,
                 global_azimuth,
                 self.dem_sampling_mode,
-                self.dem_roughness_window_m,
-                self.norm_lower_percentile,
-                self.norm_upper_percentile,
                 pixel.x,
                 pixel.y,
-                int(roughness.min()),
-                int(roughness.max()),
-                float(roughness.mean()),
+                dsm_products["reference_height"],
+                dsm_products["reference_count"],
             )
 
-        debug_image = None
+        dsm_debug_image = None
         if self.show_window or (self.save_debug_dir and self.save_every_n > 0):
-            debug_image = _stack_debug_images(
-                match["roughness_display"], match["dem_display"], valid_dem
+            dsm_debug_image = _stack_dsm_debug_images(
+                dsm_products,
+                self.norm_lower_percentile,
+                self.norm_upper_percentile,
             )
 
-        if self.show_window and debug_image is not None:
-            cv2.imshow("Roughness | DEM | Valid", debug_image)
+        if self.show_window and self.show_dsm_layers and dsm_debug_image is not None:
+            cv2.imshow("DSM H_rel | DSM G_long | DSM G_lat", dsm_debug_image)
 
         if (
             self.save_debug_dir
             and self.save_every_n > 0
             and index % self.save_every_n == 0
-            and debug_image is not None
+            and dsm_debug_image is not None
         ):
-            path = os.path.join(self.save_debug_dir, "roughness_dem_{:06d}.png".format(index))
-            cv2.imwrite(path, debug_image)
+            dsm_path = os.path.join(
+                self.save_debug_dir, "dsm_height_gradient_{:06d}.png".format(index)
+            )
+            cv2.imwrite(dsm_path, dsm_debug_image)
 
     def _resolve_heading_convention(self):
         if self.heading_convention != "auto":
             return self.heading_convention
         return "math"
 
-    def _roughness_window_px(self):
-        return max(1, int(round(self.dem_roughness_window_m / self.terrain_resolution)))
-
-    def _init_score_csv(self):
-        if not self.score_csv_path:
-            return
-        score_dir = os.path.dirname(os.path.abspath(self.score_csv_path))
-        if score_dir:
-            os.makedirs(score_dir, exist_ok=True)
-
-        file_exists = (
-            self.score_csv_append
-            and os.path.exists(self.score_csv_path)
-            and os.path.getsize(self.score_csv_path) > 0
-        )
-        self.score_csv_file = open(
-            self.score_csv_path, "a" if self.score_csv_append else "w", newline=""
-        )
-        self.score_csv_writer = csv.DictWriter(
-            self.score_csv_file,
-            fieldnames=[
-                "frame_index",
-                "local_time",
-                "utc_time",
-                "sample_name",
-                "radius_m",
-                "direction",
-                "dx_vehicle_m",
-                "dy_vehicle_m",
-                "center_lon",
-                "center_lat",
-                "sample_lon",
-                "sample_lat",
-                "heading_deg",
-                "heading_convention",
-                "dem_sampling_mode",
-                "dem_mode",
-                "score",
-                "raw_score",
-                "norm_score",
-                "gradient_score",
-                "edge_iou",
-                "valid_count",
-                "valid_ratio",
-                "rough_min",
-                "rough_max",
-                "rough_mean",
-                "roughness_scale_m",
-                "dem_roughness_window_m",
-                "norm_lower_percentile",
-                "norm_upper_percentile",
-            ],
-        )
-        if not file_exists:
-            self.score_csv_writer.writeheader()
-            self.score_csv_file.flush()
-        rospy.loginfo("Writing DEM match score CSV: %s", self.score_csv_path)
-
-    def _match_same_pose(self, roughness, center_lon, center_lat, heading, heading_convention):
+    def _sample_dsm_patch(self, center_lon, center_lat, heading, heading_convention):
         if self.dem_sampling_mode.lower() in ("crop_rotate", "crop_then_rotate", "opencv"):
-            dem_patch, valid_dem, _map_x, _map_y = sample_dem_patch_crop_rotate(
+            return sample_dem_patch_crop_rotate(
                 self.dem_data,
                 self.coord_converter,
                 center_lon,
                 center_lat,
                 heading,
-                roughness.shape[0],
-                roughness.shape[1],
-                terrain_resolution=self.terrain_resolution,
-                heading_convention=heading_convention,
-                expand_crop=self.dem_crop_rotate_expand,
-            )
-        else:
-            dem_patch, valid_dem, _map_x, _map_y = sample_dem_patch(
-                self.dem_data,
-                self.coord_converter,
-                center_lon,
-                center_lat,
-                heading,
-                roughness.shape[0],
-                roughness.shape[1],
+                self.patch_height,
+                self.patch_width,
                 terrain_resolution=self.terrain_resolution,
                 heading_convention=heading_convention,
             )
-        dem_compare = dem_patch_to_compare_image(
+        return sample_dem_patch(
+            self.dem_data,
+            self.coord_converter,
+            center_lon,
+            center_lat,
+            heading,
+            self.patch_height,
+            self.patch_width,
+            terrain_resolution=self.terrain_resolution,
+            heading_convention=heading_convention,
+        )
+
+    def _build_dsm_at_pose(self, center_lon, center_lat, heading, heading_convention):
+        dem_patch, valid_dem, _map_x, _map_y = self._sample_dsm_patch(
+            center_lon, center_lat, heading, heading_convention
+        )
+        return self._build_dsm_products(dem_patch, valid_dem)
+
+    def _build_dsm_products(self, dem_patch, valid_dem):
+        relative_height, reference_height, reference_count = _relative_height_from_radius(
             dem_patch,
-            mode=self.dem_compare_mode,
-            roughness_scale_m=self.roughness_scale_m,
-            roughness_window_px=self._roughness_window_px(),
+            valid_dem,
+            self.terrain_resolution,
+            self.dsm_reference_radius_m,
         )
-
-        match = self._score_feature_arrays(roughness, dem_compare, valid_dem)
-        match["dem_compare"] = dem_compare
-        match["valid_mask"] = match["mask"]
-        match["transform"] = "none"
-        return match
-
-    def _write_score_csv_rows(
-        self,
-        index,
-        terrain_msg,
-        roughness,
-        center_lon,
-        center_lat,
-        heading,
-        heading_convention,
-        center_match,
-    ):
-        rough = np.asarray(roughness, dtype=np.float32)
-        rough_min = int(np.nanmin(rough))
-        rough_max = int(np.nanmax(rough))
-        rough_mean = float(np.nanmean(rough))
-        valid_count = int(center_match["valid_count"])
-
-        self.score_csv_writer.writerow(
-            {
-                "frame_index": index,
-                "local_time": float(getattr(terrain_msg, "local_time", 0.0)),
-                "utc_time": float(getattr(terrain_msg, "UTC_time", 0.0)),
-                "sample_name": "center",
-                "radius_m": 0.0,
-                "direction": "center",
-                "dx_vehicle_m": 0.0,
-                "dy_vehicle_m": 0.0,
-                "center_lon": center_lon,
-                "center_lat": center_lat,
-                "sample_lon": center_lon,
-                "sample_lat": center_lat,
-                "heading_deg": heading,
-                "heading_convention": heading_convention,
-                "dem_sampling_mode": self.dem_sampling_mode,
-                "dem_mode": self.dem_compare_mode,
-                "score": center_match["score"],
-                "raw_score": center_match["raw_score"],
-                "norm_score": center_match["norm_score"],
-                "gradient_score": center_match["gradient_score"],
-                "edge_iou": center_match["edge_iou"],
-                "valid_count": valid_count,
-                "valid_ratio": float(valid_count) / max(float(roughness.size), 1.0),
-                "rough_min": rough_min,
-                "rough_max": rough_max,
-                "rough_mean": rough_mean,
-                "roughness_scale_m": self.roughness_scale_m,
-                "dem_roughness_window_m": self.dem_roughness_window_m,
-                "norm_lower_percentile": self.norm_lower_percentile,
-                "norm_upper_percentile": self.norm_upper_percentile,
-            }
+        longitudinal_gradient, lateral_gradient = _bev_style_gradients(
+            relative_height,
+            valid_dem,
+            self.terrain_resolution,
+            self.dsm_min_valid_neighbors,
         )
-        self.score_csv_file.flush()
-
-    def _build_valid_mask(self, roughness, dem_compare, valid_dem):
-        rough = np.asarray(roughness, dtype=np.float32)
-        dem = np.asarray(dem_compare, dtype=np.float32)
-        base = np.asarray(valid_dem, dtype=bool) & np.isfinite(rough) & np.isfinite(dem)
-
-        mask = base.copy()
-        if self.mask_zero_roughness:
-            mask &= rough > 0.0
-        mask &= rough >= self.roughness_mask_min
-        if self.roughness_mask_max < 255.0:
-            mask &= rough <= self.roughness_mask_max
-
-        min_count = max(100, int(round(rough.size * self.min_valid_ratio)))
-        if np.count_nonzero(mask) >= min_count:
-            return mask
-
-        fallback = base.copy()
-        if self.mask_zero_roughness:
-            fallback &= rough > 0.0
-        if np.count_nonzero(fallback) >= min_count:
-            return fallback
-        return base
-
-    def _score_feature_arrays(self, roughness, dem_compare, valid_dem):
-        rough = np.asarray(roughness, dtype=np.float32)
-        dem = np.asarray(dem_compare, dtype=np.float32)
-        mask = self._build_valid_mask(rough, dem, valid_dem)
-
-        raw_score, raw_count = zncc(rough, dem, mask)
-        rough_norm = _robust_normalize(
-            rough, mask, self.norm_lower_percentile, self.norm_upper_percentile
-        )
-        dem_norm = _robust_normalize(
-            dem, mask, self.norm_lower_percentile, self.norm_upper_percentile
-        )
-        norm_score, norm_count = zncc(rough_norm, dem_norm, mask)
-
-        rough_grad = _gradient_magnitude(rough_norm)
-        dem_grad = _gradient_magnitude(dem_norm)
-        gradient_score, gradient_count = zncc(rough_grad, dem_grad, mask)
-        edge_iou = _edge_iou(rough_grad, dem_grad, mask, self.edge_percentile)
-
-        norm_value = _finite_or(norm_score)
-        gradient_value = _finite_or(gradient_score)
-        edge_value = _finite_or(edge_iou, 0.0) * 2.0 - 1.0
-        weight_sum = max(
-            self.norm_zncc_weight + self.gradient_zncc_weight + self.edge_iou_weight,
-            1e-6,
-        )
-        score = (
-            self.norm_zncc_weight * norm_value
-            + self.gradient_zncc_weight * gradient_value
-            + self.edge_iou_weight * edge_value
-        ) / weight_sum
-
+        valid = np.asarray(valid_dem, dtype=bool) & np.isfinite(relative_height)
         return {
-            "score": float(score),
-            "raw_score": raw_score,
-            "norm_score": norm_score,
-            "gradient_score": gradient_score,
-            "edge_iou": edge_iou,
-            "valid_count": int(max(raw_count, norm_count, gradient_count)),
-            "mask": mask,
-            "roughness_display": rough_norm,
-            "dem_display": dem_norm,
+            "relative_height": relative_height,
+            "longitudinal_gradient": longitudinal_gradient,
+            "lateral_gradient": lateral_gradient,
+            "valid_mask": valid,
+            "reference_height": reference_height,
+            "reference_count": reference_count,
         }
+
 
 def main():
     rospy.init_node("localization_python_node")

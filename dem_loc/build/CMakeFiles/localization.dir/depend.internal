@@ -15394,14 +15394,13 @@ CMakeFiles/localization.dir/src/cpp/CoordConverter.cpp.o
  /home/hsw/catkin_ws/devel/include/self_state/LocalPose.h
  /home/hsw/catkin_ws/devel/include/sensor/PosType.h
  /home/hsw/catkin_ws/devel/include/world_state/ColorMap.h
+ /home/hsw/catkin_ws/devel/include/world_state/DYNAMIC_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/EntityMap.h
- /home/hsw/catkin_ws/devel/include/world_state/GENERAL_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/PEDESTRIAN_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/Pose6D.h
  /home/hsw/catkin_ws/devel/include/world_state/SemanticMap.h
  /home/hsw/catkin_ws/devel/include/world_state/SimilarityMap.h
  /home/hsw/catkin_ws/devel/include/world_state/TerrainMap.h
- /home/hsw/catkin_ws/devel/include/world_state/VEHICLE_OBJ.h
  /home/hsw/catkin_ws/program/dem_loc/src/cpp/CoordConverter.cpp
  /opt/ros/noetic/include/geometry_msgs/Point.h
  /opt/ros/noetic/include/geometry_msgs/Point32.h
@@ -20717,14 +20716,13 @@ CMakeFiles/localization.dir/src/cpp/Tool.cpp.o
  /home/hsw/catkin_ws/devel/include/self_state/LocalPose.h
  /home/hsw/catkin_ws/devel/include/sensor/PosType.h
  /home/hsw/catkin_ws/devel/include/world_state/ColorMap.h
+ /home/hsw/catkin_ws/devel/include/world_state/DYNAMIC_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/EntityMap.h
- /home/hsw/catkin_ws/devel/include/world_state/GENERAL_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/PEDESTRIAN_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/Pose6D.h
  /home/hsw/catkin_ws/devel/include/world_state/SemanticMap.h
  /home/hsw/catkin_ws/devel/include/world_state/SimilarityMap.h
  /home/hsw/catkin_ws/devel/include/world_state/TerrainMap.h
- /home/hsw/catkin_ws/devel/include/world_state/VEHICLE_OBJ.h
  /home/hsw/catkin_ws/program/dem_loc/src/cpp/Tool.cpp
  /opt/ros/noetic/include/geometry_msgs/Point.h
  /opt/ros/noetic/include/geometry_msgs/Point32.h
@@ -26041,14 +26039,13 @@ CMakeFiles/localization.dir/src/localization.cpp.o
  /home/hsw/catkin_ws/devel/include/self_state/LocalPose.h
  /home/hsw/catkin_ws/devel/include/sensor/PosType.h
  /home/hsw/catkin_ws/devel/include/world_state/ColorMap.h
+ /home/hsw/catkin_ws/devel/include/world_state/DYNAMIC_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/EntityMap.h
- /home/hsw/catkin_ws/devel/include/world_state/GENERAL_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/PEDESTRIAN_OBJ.h
  /home/hsw/catkin_ws/devel/include/world_state/Pose6D.h
  /home/hsw/catkin_ws/devel/include/world_state/SemanticMap.h
  /home/hsw/catkin_ws/devel/include/world_state/SimilarityMap.h
  /home/hsw/catkin_ws/devel/include/world_state/TerrainMap.h
- /home/hsw/catkin_ws/devel/include/world_state/VEHICLE_OBJ.h
  /home/hsw/catkin_ws/program/dem_loc/src/localization.cpp
  /opt/ros/noetic/include/cv_bridge/cv_bridge.h
  /opt/ros/noetic/include/geometry_msgs/Point.h
