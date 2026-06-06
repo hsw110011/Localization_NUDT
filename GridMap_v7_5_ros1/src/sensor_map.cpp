@@ -655,11 +655,11 @@ void SensorMap::handle_points()
     // auto projection_duration = std::chrono::duration_cast<std::chrono::milliseconds>(projection_end_time - projection_start_time);
     // std::cout << "投影: " << projection_duration.count() << " ms" << std::endl;
 
-    // 3. BEV绘制 (根据配置决定是否显示BEV，优化：降低频率)
+    // 3. ColorMap BEV 绘制暂时关闭。
     auto bev_start_time = std::chrono::high_resolution_clock::now();
-    if(params->f_show_bev_color > 0 ) { 
-        Draw_lidar_bev(colored_lidar_points);
-    }
+    // if(params->f_show_bev_color > 0 ) {
+    //     Draw_lidar_bev(colored_lidar_points);
+    // }
     auto bev_end_time = std::chrono::high_resolution_clock::now();
     auto bev_duration = std::chrono::duration_cast<std::chrono::milliseconds>(bev_end_time - bev_start_time);
     // std::cout << "Draw_lidar_bev: " << bev_duration.count() << " ms" << std::endl;
@@ -761,7 +761,8 @@ void SensorMap::handle_points()
 
     // 优化：检查是否有订阅者，避免无用的计算
     grid_map_handler_v2.publishTerrainMap(terrain_map_pub_, local_pose);
-    grid_map_handler_v2.publishColorMap(color_map_pub_, local_pose);
+    // ColorMap发布暂时关闭。
+    // grid_map_handler_v2.publishColorMap(color_map_pub_, local_pose);
     grid_map_handler_v2.publishObstacleMap(obstacle_pub_, grid_map_handler_v2.near_obstacles_, grid_map_handler_v2.far_obstacles_, local_pose);
 
 

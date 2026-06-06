@@ -1088,14 +1088,14 @@ void GridMapHandler_v2::publishColorMap(
 
     publisher.publish(msg);
 
-    // --- 可选显示（仅在需要显示时才进行图像合成计算） ---
-    if(params->b_show_colormap_vehicle) {
-        cv::Mat display_mat;
-        std::vector<cv::Mat> channels = {vehicle_rgb_b, vehicle_rgb_g, vehicle_rgb_r}; // BGR顺序
-        cv::merge(channels, display_mat);
-        cv::imshow("ColorMap (Vehicle Frame)", display_mat);
-        cv::waitKey(1);
-    }
+    // ColorMap BEV 显示暂时关闭。
+    // if(params->b_show_colormap_vehicle) {
+    //     cv::Mat display_mat;
+    //     std::vector<cv::Mat> channels = {vehicle_rgb_b, vehicle_rgb_g, vehicle_rgb_r}; // BGR顺序
+    //     cv::merge(channels, display_mat);
+    //     cv::imshow("ColorMap (Vehicle Frame)", display_mat);
+    //     cv::waitKey(1);
+    // }
 }
 
 
@@ -1264,9 +1264,9 @@ void GridMapHandler_v2::showMaps(double current_heading) {
     generateSlopeVisualization(slope_map, has_data, current_heading);
 
     // 使用您现有的可视化方法（保持一致性）
-    // height_map 已经包含了高度差信息，直接使用
+    // height_map 已经包含了高度差信息，高度差BEV可视化暂时关闭。
     auto start_time1 = std::chrono::high_resolution_clock::now();
-    params->generateColorMap(height_map, has_data, "GridMap Height Diff");
+    // params->generateColorMap(height_map, has_data, "GridMap Height Diff");
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
     std::cout << "generateColorMap duration: " << duration1.count() << " ms" << std::endl;
@@ -1754,8 +1754,8 @@ void GridMapHandler_v2::opencv_showMaps(double current_heading) {
     auto duration_mid1 = std::chrono::duration_cast<std::chrono::milliseconds>(mid_time1 - start_time1);
     // std::cout << "opencv_showMaps global_height_mat: " << duration_mid1.count() << " ms" << std::endl;
 
-    // 步骤3: 显示高度差图
-    params->generateColorMap(vehicle_height_mat, global_has_data, "GridMap Height Diff");
+    // 步骤3: 高度差BEV可视化暂时关闭。
+    // params->generateColorMap(vehicle_height_mat, global_has_data, "GridMap Height Diff");
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - mid_time1);
     // std::cout << "opencv_showMaps global_height_mat 画图: " << duration1.count() << " ms" << std::endl;
@@ -2279,4 +2279,3 @@ void GridMapHandler_v2::visualizeCombinedObstacleDetection(const cv::Mat& near_h
 
     // std::cout << "统一可视化完成，显示范围：前方0-100m, 左右±25m" << std::endl;
 }
-

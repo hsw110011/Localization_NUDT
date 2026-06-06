@@ -394,8 +394,6 @@ void LidarBevBuilder::computeRobustEdges()
         {1, 2, 1}
     };
 
-    std::vector<float> gradients(cell_count, 0.0f);
-    std::vector<uint8_t> edge_candidates(cell_count, 0);
 
     for (int row = 0; row < rows; ++row) {
         for (int col = 0; col < cols; ++col) {
@@ -405,8 +403,6 @@ void LidarBevBuilder::computeRobustEdges()
             }
 
             const float center_height = smoothed_height[index];
-            float local_min = center_height;
-            float local_max = center_height;
             int valid_neighbor_count = 0;
             double grad_index1 = 0.0;
             double grad_index0 = 0.0;
@@ -423,8 +419,6 @@ void LidarBevBuilder::computeRobustEdges()
                             gridIndex(neighbor_row, neighbor_col, cols);
                         if (smoothed_valid[neighbor_index]) {
                             value = smoothed_height[neighbor_index];
-                            local_min = std::min(local_min, value);
-                            local_max = std::max(local_max, value);
                             ++valid_neighbor_count;
                         }
                     }
@@ -439,12 +433,6 @@ void LidarBevBuilder::computeRobustEdges()
             if (valid_neighbor_count < config_.edge_min_valid_neighbors) {
                 continue;
             }
-
-            const float local_jump = local_max - local_min;
-            const bool has_structure =
-                local_max >= static_cast<float>(config_.edge_min_height);
-            const bool has_height_jump =
-                local_jump >= static_cast<float>(config_.edge_min_jump);
 
             grid_map::Position center_position;
             grid_map::Position index0_position;
@@ -507,25 +495,15 @@ void LidarBevBuilder::computeRobustEdges()
                 static_cast<float>(map_gradient.dot(lateral_unit));
             const float gradient = static_cast<float>(map_gradient.norm());
 
-            if (has_structure && has_height_jump) {
-                longitudinal_gradient_layer(row, col) = longitudinal_gradient;
-                lateral_gradient_layer(row, col) = lateral_gradient;
-                gradient_layer(row, col) = gradient;
-            } else {
-                longitudinal_gradient_layer(row, col) = 0.0f;
-                lateral_gradient_layer(row, col) = 0.0f;
-                gradient_layer(row, col) = 0.0f;
-            }
-            gradients[index] = gradient_layer(row, col);
-
-            if (has_structure &&
-                has_height_jump &&
-                gradient > static_cast<float>(config_.edge_gradient_threshold)) {
-                edge_candidates[index] = 1;
-            }
+            // Edge gating disabled temporarily: always output gradients on smoothed cells.
+            longitudinal_gradient_layer(row, col) = longitudinal_gradient;
+            lateral_gradient_layer(row, col) = lateral_gradient;
+            gradient_layer(row, col) = gradient;
         }
     }
 
+    // Edge layer (E_L) detection disabled temporarily.
+    /*
     for (int row = 0; row < rows; ++row) {
         for (int col = 0; col < cols; ++col) {
             const std::size_t index = gridIndex(row, col, cols);
@@ -562,6 +540,7 @@ void LidarBevBuilder::computeRobustEdges()
             }
         }
     }
+    */
 }
 
 void LidarBevBuilder::showDebugWindows() const
