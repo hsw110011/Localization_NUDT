@@ -1,0 +1,8 @@
+prefix=/home/hsw/catkin_ws/program/sem_loc/build/devel
+
+Name: loc_bev
+Description: Description of loc_bev
+Version: 1.0.0
+Cflags: -I/home/hsw/catkin_ws/program/sem_loc/src/include
+Libs: -L${prefix}/lib 
+Requires: roscpp

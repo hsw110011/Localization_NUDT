@@ -1,0 +1,7 @@
+set(loc_bev_SETUP_PY_SETUP_MODULE "distutils.core")
+set(loc_bev_SETUP_PY_VERSION "1.0.0")
+set(loc_bev_SETUP_PY_SCRIPTS "")
+set(loc_bev_SETUP_PY_PACKAGES "loc_bev")
+set(loc_bev_SETUP_PY_PACKAGE_DIRS "python/loc_bev")
+set(loc_bev_SETUP_PY_MODULES "")
+set(loc_bev_SETUP_PY_MODULE_DIRS "")

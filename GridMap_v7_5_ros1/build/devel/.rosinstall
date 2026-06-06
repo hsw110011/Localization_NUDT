@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/hsw/catkin_ws/program/GridMap_v7_5_ros1/build/devel/setup.sh

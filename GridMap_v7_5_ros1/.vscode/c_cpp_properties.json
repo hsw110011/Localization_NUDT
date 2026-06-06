@@ -1,0 +1,36 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/xyf/ars548radar/A4_ROS1_codex/devel/include/**",
+        "/home/wxp/UGV_2023/devel/include/**",
+        "/opt/ros/noetic/include/**",
+        "/usr/include/**",
+        "/usr/include/eigen3/**",
+        "/usr/include/pcl-1.10/**",
+        "/usr/include/opencv4/**",
+        "${workspaceFolder}/include/**",
+        "${workspaceFolder}/src/**",
+        "${workspaceFolder}/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++17",
+      "defines": [
+        "ROS_BUILD_SHARED_LIBS=1"
+      ],
+      "compilerArgs": [
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic"
+      ]
+    }
+  ],
+  "version": 4
+}

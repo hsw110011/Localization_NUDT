@@ -1,0 +1,8 @@
+prefix=/usr/local
+
+Name: loc_bev
+Description: Description of loc_bev
+Version: 1.0.0
+Cflags: -I${prefix}/include
+Libs: -L${prefix}/lib 
+Requires: roscpp

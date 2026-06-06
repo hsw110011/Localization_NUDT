@@ -1,0 +1,112 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug GridMap",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/GridMap",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "ROS_PACKAGE_PATH",
+                    "value": "/home/xyf/ars548radar/A4_ROS1_codex/src:/opt/ros/noetic/share"
+                },
+                {
+                    "name": "ROS_MASTER_URI",
+                    "value": "http://localhost:11311"
+                },
+                {
+                    "name": "ROS_ROOT",
+                    "value": "/opt/ros/noetic/share/ros"
+                },
+                {
+                    "name": "ROS_DISTRO",
+                    "value": "noetic"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "Set Disassembly Flavor to Intel",
+                    "text": "-gdb-set disassembly-flavor intel",
+                    "ignoreFailures": true
+                }
+            ],
+
+            "miDebuggerPath": "/usr/bin/gdb",
+            "logging": {
+                "moduleLoad": false,
+                "trace": false,
+                "engineLogging": false,
+                "programOutput": true,
+                "exceptions": true
+            },
+            "sourceFileMap": {
+                "/build/glibc-OTsEL5/glibc-2.27/csu": "/usr/src/glibc/csu"
+            }
+        },
+        {
+            "name": "Run GridMap (No Debug)",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/bin/GridMap",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [
+                {
+                    "name": "ROS_PACKAGE_PATH",
+                    "value": "/home/xyf/ars548radar/A4_ROS1_codex/src:/opt/ros/noetic/share"
+                },
+                {
+                    "name": "ROS_MASTER_URI",
+                    "value": "http://localhost:11311"
+                },
+                {
+                    "name": "ROS_ROOT",
+                    "value": "/opt/ros/noetic/share/ros"
+                },
+                {
+                    "name": "ROS_DISTRO",
+                    "value": "noetic"
+                }
+            ],
+            "externalConsole": false,
+            "MIMode": "gdb",
+
+            "miDebuggerPath": "/usr/bin/gdb",
+            "logging": {
+                "moduleLoad": false,
+                "trace": false,
+                "engineLogging": false,
+                "programOutput": true,
+                "exceptions": false
+            }
+        },
+        {
+            "name": "Attach to Process",
+            "type": "cppdbg",
+            "request": "attach",
+            "program": "${workspaceFolder}/bin/GridMap",
+            "processId": "${command:pickProcess}",
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "Enable pretty-printing for gdb",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "miDebuggerPath": "/usr/bin/gdb"
+        }
+    ]
+}
