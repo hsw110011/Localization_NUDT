@@ -16,6 +16,7 @@ find_package(OpenCV REQUIRED)
 find_package(catkin REQUIRED COMPONENTS
   roscpp
   sensor_msgs
+  nav_msgs
   grid_map_core
   grid_map_ros
   grid_map_msgs

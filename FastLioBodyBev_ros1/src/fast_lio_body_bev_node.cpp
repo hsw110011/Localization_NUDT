@@ -2,6 +2,7 @@
 #include <grid_map_core/GridMap.hpp>
 #include <grid_map_msgs/GridMap.h>
 #include <grid_map_ros/grid_map_ros.hpp>
+#include <nav_msgs/Odometry.h>
 #include <opencv2/opencv.hpp>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
@@ -16,6 +17,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -47,26 +49,48 @@ bool isFinite(double value)
 class BodyBevBuilder {
 public:
   struct Config {
-    std::string frame_id = "body";
+    bool use_odometry_frame = true;
+    bool use_ransac_ground = true;
+    bool show_windows = true;
+
+    std::string odometry_frame_id = "camera_init";
+    std::string body_frame_id = "body";
+
     double resolution = 0.2;
     double map_size_x = 100.0;
     double map_size_y = 100.0;
-    double point_min_z = -10.0;
-    double point_max_z = 200.0;
+    double point_min_z = -5.0;
+    double point_max_z = 80.0;
     bool ego_filter_enabled = true;
-    double ego_box_min_x = -3.0;
-    double ego_box_max_x = 1.0;
-    double ego_box_min_y = -1.0;
-    double ego_box_max_y = 1.0;
+    double ego_box_min_x = -2.0;
+    double ego_box_max_x = 2.0;
+    double ego_box_min_y = -2.0;
+    double ego_box_max_y = 2.0;
+
+    double near_inner_radius = 2.0;
+    double near_outer_radius = 15.0;
+    double ground_candidate_min_z = -3.0;
+    double ground_candidate_max_z = 1.0;
+    double ground_ransac_distance = 0.18;
+    double ground_max_plane_tilt_deg = 25.0;
+    double ground_fallback_quantile = 0.35;
+    int ground_min_points = 30;
+
     double height_quantile = 0.90;
     int accumulation_frame_count = 5;
-    int count_saturation = 20;
-    double distance_decay_alpha = 0.03;
-    double edge_gradient_threshold = 2.0;
-    double edge_min_height = 0.5;
-    double edge_min_jump = 0.5;
-    int edge_min_valid_neighbors = 3;
-    bool show_windows = false;
+    int count_saturation = 8;
+    double distance_decay_alpha = 0.02;
+    double edge_gradient_threshold = 1.0;
+    double edge_min_height = 0.45;
+    double edge_min_jump = 0.50;
+    int edge_min_valid_neighbors = 4;
+  };
+
+  struct OdometryState {
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    ros::Time stamp;
+    std::string frame_id;
+    bool valid = false;
   };
 
   void configure(const Config& config)
@@ -82,6 +106,14 @@ public:
       std::swap(config_.ego_box_min_y, config_.ego_box_max_y);
     }
     config_.height_quantile = std::max(0.0, std::min(1.0, config_.height_quantile));
+    config_.ground_fallback_quantile =
+      std::max(0.0, std::min(1.0, config_.ground_fallback_quantile));
+    config_.near_inner_radius = std::max(0.0, config_.near_inner_radius);
+    config_.near_outer_radius = std::max(config_.near_inner_radius, config_.near_outer_radius);
+    config_.ground_ransac_distance = std::max(0.0, config_.ground_ransac_distance);
+    config_.ground_max_plane_tilt_deg =
+      std::max(0.0, std::min(89.0, config_.ground_max_plane_tilt_deg));
+    config_.ground_min_points = std::max(3, config_.ground_min_points);
     config_.accumulation_frame_count = std::max(1, config_.accumulation_frame_count);
     config_.count_saturation = std::max(1, config_.count_saturation);
     config_.edge_gradient_threshold = std::max(0.0, config_.edge_gradient_threshold);
@@ -90,12 +122,31 @@ public:
     config_.edge_min_valid_neighbors = std::max(1, std::min(9, config_.edge_min_valid_neighbors));
   }
 
-  void build(const std::vector<PointXYZ>& body_points, const ros::Time& stamp)
+  void build(const std::vector<PointXYZ>& body_points,
+             const ros::Time& cloud_stamp,
+             const OdometryState* odometry)
   {
-    stamp_ = stamp.isZero() ? ros::Time::now() : stamp;
-    initializeMap(config_.frame_id, grid_map::Position(0.0, 0.0));
+    const bool use_odom =
+      config_.use_odometry_frame && odometry != nullptr && odometry->valid;
 
-    std::vector<PointXYZ> prepared_points;
+    const std::string frame_id = use_odom
+      ? (odometry->frame_id.empty() ? config_.odometry_frame_id : odometry->frame_id)
+      : config_.body_frame_id;
+
+    Eigen::Vector3d center_xyz = Eigen::Vector3d::Zero();
+    if (use_odom) {
+      center_xyz = odometry->pose.translation();
+    }
+    const grid_map::Position center(center_xyz.x(), center_xyz.y());
+    stamp_ = use_odom && !odometry->stamp.isZero()
+      ? odometry->stamp
+      : (cloud_stamp.isZero() ? ros::Time::now() : cloud_stamp);
+    display_pose_ = use_odom ? odometry->pose : Eigen::Isometry3d::Identity();
+    display_pose_valid_ = true;
+
+    initializeMap(frame_id, center);
+
+    std::vector<PreparedPoint> prepared_points;
     prepared_points.reserve(body_points.size());
 
     for (const auto& point : body_points) {
@@ -108,7 +159,25 @@ public:
       if (shouldRejectEgoPoint(point)) {
         continue;
       }
-      prepared_points.push_back(point);
+
+      PreparedPoint prepared;
+      prepared.body_x = point.x;
+      prepared.body_y = point.y;
+      prepared.body_z = point.z;
+
+      if (use_odom) {
+        const Eigen::Vector3d point_odom =
+          odometry->pose * Eigen::Vector3d(point.x, point.y, point.z);
+        prepared.x = point_odom.x();
+        prepared.y = point_odom.y();
+        prepared.z = point_odom.z();
+      } else {
+        prepared.x = point.x;
+        prepared.y = point.y;
+        prepared.z = point.z;
+      }
+
+      prepared_points.push_back(prepared);
     }
 
     const double ground_reference = estimateGroundReference(prepared_points);
@@ -121,18 +190,24 @@ public:
 
       const GlobalCellKey key = makeGlobalCellKey(point.x, point.y);
       CellAccumulator& cell = current_cells[key];
-      cell.max_z = std::max(cell.max_z, point.z);
+      const float z = static_cast<float>(point.z);
+      cell.max_z = std::max(cell.max_z, z);
+      cell.min_z = std::min(cell.min_z, z);
+      cell.heights.push_back(z);
       ++cell.count;
     }
 
-    for (const auto& entry : current_cells) {
-      const CellAccumulator& cell = entry.second;
+    for (auto& entry : current_cells) {
+      CellAccumulator& cell = entry.second;
       if (cell.count <= 0) {
         continue;
       }
 
+      const float h_q = static_cast<float>(percentile(cell.heights, config_.height_quantile));
       const grid_map::Position cell_center = getGlobalCellCenter(entry.first);
-      const double distance = std::hypot(cell_center.x(), cell_center.y());
+      const double dx = cell_center.x() - center.x();
+      const double dy = cell_center.y() - center.y();
+      const double distance = std::sqrt(dx * dx + dy * dy);
       const double count_weight =
         std::min(static_cast<double>(cell.count) /
                  static_cast<double>(config_.count_saturation),
@@ -141,14 +216,15 @@ public:
 
       CellObservation observation;
       observation.stamp = stamp_;
-      observation.h_rel = static_cast<float>(cell.max_z - ground_reference);
-      observation.h_q = cell.max_z;
+      observation.h_rel = static_cast<float>(static_cast<double>(h_q) - ground_reference);
+      observation.h_q = h_q;
+      observation.h_range = cell.max_z - cell.min_z;
       observation.count = static_cast<float>(cell.count);
       observation.confidence = static_cast<float>(count_weight * distance_weight);
       addObservationToHistory(entry.first, observation);
     }
 
-    fillMapFromHistory();
+    fillMapFromHistory(center);
     computeRobustEdges();
 
     if (config_.show_windows) {
@@ -170,9 +246,20 @@ public:
   }
 
 private:
+  struct PreparedPoint {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double body_x = 0.0;
+    double body_y = 0.0;
+    double body_z = 0.0;
+  };
+
   struct CellAccumulator {
     float max_z = -std::numeric_limits<float>::max();
+    float min_z = std::numeric_limits<float>::max();
     int count = 0;
+    std::vector<float> heights;
   };
 
   struct GlobalCellKey {
@@ -198,6 +285,7 @@ private:
     ros::Time stamp;
     float h_rel = 0.0f;
     float h_q = 0.0f;
+    float h_range = 0.0f;
     float count = 0.0f;
     float confidence = 0.0f;
   };
@@ -209,12 +297,14 @@ private:
   Config config_;
   grid_map::GridMap map_;
   ros::Time stamp_;
+  Eigen::Isometry3d display_pose_ = Eigen::Isometry3d::Identity();
+  bool display_pose_valid_ = false;
   std::unordered_map<GlobalCellKey, CellHistory, GlobalCellKeyHash> cell_history_;
 
   void initializeMap(const std::string& frame_id, const grid_map::Position& center)
   {
     const std::vector<std::string> layers = {
-      "H_rel_surf", "M_L", "W_L", "G_L", "G_long_L",
+      "H_rel_surf", "H_range", "M_L", "W_L", "G_L", "G_long_L",
       "G_lat_L", "E_L", "N_L", "H_q"
     };
 
@@ -229,6 +319,7 @@ private:
     map_["G_long_L"].setConstant(kNaN);
     map_["G_lat_L"].setConstant(kNaN);
     map_["H_q"].setConstant(kNaN);
+    map_["H_range"].setConstant(kNaN);
     map_["M_L"].setConstant(0.0f);
     map_["W_L"].setConstant(0.0f);
     map_["E_L"].setConstant(0.0f);
@@ -289,9 +380,10 @@ private:
     return static_cast<float>(sum / static_cast<double>(count));
   }
 
-  void fillMapFromHistory()
+  void fillMapFromHistory(const grid_map::Position& center)
   {
     auto& h_rel_layer = map_["H_rel_surf"];
+    auto& h_range_layer = map_["H_range"];
     auto& mask_layer = map_["M_L"];
     auto& confidence_layer = map_["W_L"];
     auto& count_layer = map_["N_L"];
@@ -328,6 +420,7 @@ private:
       }
 
       h_rel_layer(row, col) = h_rel;
+      h_range_layer(row, col) = averageHistoryValue(history, &CellObservation::h_range);
       h_q_layer(row, col) = averageHistoryValue(history, &CellObservation::h_q);
       count_layer(row, col) = averageHistoryValue(history, &CellObservation::count);
       confidence_layer(row, col) = averageHistoryValue(history, &CellObservation::confidence);
@@ -489,36 +582,60 @@ private:
         const Eigen::Vector2d map_gradient =
           index0_gradient * index0_unit + index1_gradient * index1_unit;
 
-        longitudinal_gradient_layer(row, col) = static_cast<float>(map_gradient.x());
-        lateral_gradient_layer(row, col) = static_cast<float>(map_gradient.y());
+        Eigen::Vector2d longitudinal_unit(1.0, 0.0);
+        Eigen::Vector2d lateral_unit(0.0, 1.0);
+        if (display_pose_valid_) {
+          longitudinal_unit = Eigen::Vector2d(display_pose_.linear()(0, 0),
+                                              display_pose_.linear()(1, 0));
+          lateral_unit = Eigen::Vector2d(display_pose_.linear()(0, 1),
+                                         display_pose_.linear()(1, 1));
+          if (longitudinal_unit.norm() > 1e-6) {
+            longitudinal_unit.normalize();
+          }
+          if (lateral_unit.norm() > 1e-6) {
+            lateral_unit.normalize();
+          }
+        }
+
+        longitudinal_gradient_layer(row, col) =
+          static_cast<float>(map_gradient.dot(longitudinal_unit));
+        lateral_gradient_layer(row, col) =
+          static_cast<float>(map_gradient.dot(lateral_unit));
         gradient_layer(row, col) = static_cast<float>(map_gradient.norm());
       }
     }
   }
 
-  double estimateGroundReference(const std::vector<PointXYZ>& points) const
+  double estimateGroundReference(const std::vector<PreparedPoint>& points) const
   {
     constexpr double kFrontHalfAngleRad = M_PI / 6.0;
-    constexpr std::size_t kReferencePointCount = 20;
 
     std::vector<std::pair<double, double>> front_candidates;
-    std::vector<std::pair<double, double>> fallback_candidates;
+    std::vector<float> fallback_heights;
     front_candidates.reserve(points.size());
-    fallback_candidates.reserve(points.size());
+    fallback_heights.reserve(points.size());
 
     for (const auto& point : points) {
       if (!std::isfinite(point.z)) {
         continue;
       }
 
-      const double distance_sq = point.x * point.x + point.y * point.y;
-      fallback_candidates.emplace_back(distance_sq, point.z);
+      fallback_heights.push_back(static_cast<float>(point.z));
 
-      if (point.x <= 0.0) {
+      const double distance_sq = point.body_x * point.body_x + point.body_y * point.body_y;
+      const double distance = std::sqrt(distance_sq);
+      if (distance < config_.near_inner_radius || distance > config_.near_outer_radius) {
+        continue;
+      }
+      if (point.body_z < config_.ground_candidate_min_z ||
+          point.body_z > config_.ground_candidate_max_z) {
+        continue;
+      }
+      if (point.body_x <= 0.0) {
         continue;
       }
 
-      const double angle = std::atan2(point.y, point.x);
+      const double angle = std::atan2(point.body_y, point.body_x);
       if (std::abs(angle) > kFrontHalfAngleRad) {
         continue;
       }
@@ -526,12 +643,16 @@ private:
       front_candidates.emplace_back(distance_sq, point.z);
     }
 
-    const double front_reference = averageNearestHeights(front_candidates);
+    const double front_reference = front_candidates.size() >=
+      static_cast<std::size_t>(config_.ground_min_points)
+        ? averageNearestHeights(front_candidates)
+        : std::numeric_limits<double>::quiet_NaN();
     if (std::isfinite(front_reference)) {
       return front_reference;
     }
 
-    const double fallback_reference = averageNearestHeights(fallback_candidates);
+    const double fallback_reference =
+      percentile(fallback_heights, config_.ground_fallback_quantile);
     if (std::isfinite(fallback_reference)) {
       return fallback_reference;
     }
@@ -643,6 +764,10 @@ private:
 
   bool getVehicleFrameIndex(int image_row, int image_col, grid_map::Index& index) const
   {
+    if (!display_pose_valid_) {
+      return false;
+    }
+
     const int image_rows = map_.getSize()(0);
     const int image_cols = map_.getSize()(1);
     const double x_vehicle =
@@ -652,7 +777,9 @@ private:
       0.5 * static_cast<double>(image_cols) * config_.resolution -
       (static_cast<double>(image_col) + 0.5) * config_.resolution;
 
-    return map_.getIndex(grid_map::Position(x_vehicle, y_vehicle), index);
+    const Eigen::Vector3d map_point =
+      display_pose_ * Eigen::Vector3d(x_vehicle, y_vehicle, 0.0);
+    return map_.getIndex(grid_map::Position(map_point.x(), map_point.y()), index);
   }
 
   void drawCenterMark(cv::Mat& image) const
@@ -780,19 +907,28 @@ private:
       return;
     }
 
-    static const std::array<std::string, 5> window_names = {
+    static const std::array<std::string, 6> window_names = {
       "BEV Relative Surface Height Map (H_rel_surf)",
+      "BEV Cell Height Range Map (H_range)",
       "BEV Valid Observation Mask (M_L)",
       "BEV Observation Confidence Map (W_L)",
       "BEV Longitudinal Height Gradient Map (G_long_L)",
       "BEV Lateral Height Gradient Map (G_lat_L)"
     };
+    static bool windows_created = false;
+    if (!windows_created) {
+      for (const auto& window_name : window_names) {
+        cv::namedWindow(window_name, cv::WINDOW_NORMAL);
+      }
+      windows_created = true;
+    }
 
     cv::imshow(window_names[0], renderHeightLayer("H_rel_surf"));
-    cv::imshow(window_names[1], renderBinaryLayer("M_L"));
-    cv::imshow(window_names[2], renderNormalizedLayer("W_L", 0.0, 1.0));
-    cv::imshow(window_names[3], renderHeightLayer("G_long_L"));
-    cv::imshow(window_names[4], renderHeightLayer("G_lat_L"));
+    cv::imshow(window_names[1], renderHeightLayer("H_range"));
+    cv::imshow(window_names[2], renderBinaryLayer("M_L"));
+    cv::imshow(window_names[3], renderNormalizedLayer("W_L", 0.0, 1.0));
+    cv::imshow(window_names[4], renderHeightLayer("G_long_L"));
+    cv::imshow(window_names[5], renderHeightLayer("G_lat_L"));
     cv::waitKey(1);
   }
 };
@@ -804,49 +940,102 @@ public:
       pnh_("~")
   {
     pnh_.param<std::string>("input_topic", input_topic_, "/cloud_registered_body");
+    pnh_.param<std::string>("odometry_topic", odometry_topic_, "/Odometry");
     pnh_.param<std::string>("output_topic", output_topic_, "/lidar_bev/grid_map");
     pnh_.param<double>("update_rate_hz", update_rate_hz_, 10.0);
 
     BodyBevBuilder::Config config;
-    pnh_.param<std::string>("frame_id", config.frame_id, "body");
+    pnh_.param<bool>("use_odometry_frame", config.use_odometry_frame, true);
+    pnh_.param<bool>("use_ransac_ground", config.use_ransac_ground, true);
+    pnh_.param<std::string>("odometry_frame_id", config.odometry_frame_id, "camera_init");
+    pnh_.param<std::string>("body_frame_id", config.body_frame_id, "body");
     pnh_.param<double>("resolution", config.resolution, 0.2);
     pnh_.param<double>("map_size_x", config.map_size_x, 100.0);
     pnh_.param<double>("map_size_y", config.map_size_y, 100.0);
-    pnh_.param<double>("point_min_z", config.point_min_z, -10.0);
-    pnh_.param<double>("point_max_z", config.point_max_z, 200.0);
+    pnh_.param<double>("point_min_z", config.point_min_z, -5.0);
+    pnh_.param<double>("point_max_z", config.point_max_z, 80.0);
     pnh_.param<bool>("ego_filter_enabled", config.ego_filter_enabled, true);
-    pnh_.param<double>("ego_box_min_x", config.ego_box_min_x, -3.0);
-    pnh_.param<double>("ego_box_max_x", config.ego_box_max_x, 1.0);
-    pnh_.param<double>("ego_box_min_y", config.ego_box_min_y, -1.0);
-    pnh_.param<double>("ego_box_max_y", config.ego_box_max_y, 1.0);
+    pnh_.param<double>("ego_box_min_x", config.ego_box_min_x, -2.0);
+    pnh_.param<double>("ego_box_max_x", config.ego_box_max_x, 2.0);
+    pnh_.param<double>("ego_box_min_y", config.ego_box_min_y, -2.0);
+    pnh_.param<double>("ego_box_max_y", config.ego_box_max_y, 2.0);
+    pnh_.param<double>("near_inner_radius", config.near_inner_radius, 2.0);
+    pnh_.param<double>("near_outer_radius", config.near_outer_radius, 15.0);
+    pnh_.param<double>("ground_candidate_min_z", config.ground_candidate_min_z, -3.0);
+    pnh_.param<double>("ground_candidate_max_z", config.ground_candidate_max_z, 1.0);
+    pnh_.param<double>("ground_ransac_distance", config.ground_ransac_distance, 0.18);
+    pnh_.param<double>("ground_max_plane_tilt_deg", config.ground_max_plane_tilt_deg, 25.0);
+    pnh_.param<double>("ground_fallback_quantile", config.ground_fallback_quantile, 0.35);
+    pnh_.param<int>("ground_min_points", config.ground_min_points, 30);
     pnh_.param<double>("height_quantile", config.height_quantile, 0.90);
     pnh_.param<int>("accumulation_frame_count", config.accumulation_frame_count, 5);
-    pnh_.param<int>("count_saturation", config.count_saturation, 20);
-    pnh_.param<double>("distance_decay_alpha", config.distance_decay_alpha, 0.03);
-    pnh_.param<double>("edge_gradient_threshold", config.edge_gradient_threshold, 2.0);
-    pnh_.param<double>("edge_min_height", config.edge_min_height, 0.5);
-    pnh_.param<double>("edge_min_jump", config.edge_min_jump, 0.5);
-    pnh_.param<int>("edge_min_valid_neighbors", config.edge_min_valid_neighbors, 3);
-    pnh_.param<bool>("show_windows", config.show_windows, false);
+    pnh_.param<int>("count_saturation", config.count_saturation, 8);
+    pnh_.param<double>("distance_decay_alpha", config.distance_decay_alpha, 0.02);
+    pnh_.param<double>("edge_gradient_threshold", config.edge_gradient_threshold, 1.0);
+    pnh_.param<double>("edge_min_height", config.edge_min_height, 0.45);
+    pnh_.param<double>("edge_min_jump", config.edge_min_jump, 0.50);
+    pnh_.param<int>("edge_min_valid_neighbors", config.edge_min_valid_neighbors, 4);
+    pnh_.param<bool>("show_windows", config.show_windows, true);
 
+    use_odometry_frame_ = config.use_odometry_frame;
+    odometry_frame_id_ = config.odometry_frame_id;
     builder_.configure(config);
     pub_ = nh_.advertise<grid_map_msgs::GridMap>(output_topic_, 5);
-    sub_ = nh_.subscribe(input_topic_, 5, &BodyBevNode::cloudCallback, this);
+    cloud_sub_ = nh_.subscribe(input_topic_, 5, &BodyBevNode::cloudCallback, this);
+    if (use_odometry_frame_) {
+      odom_sub_ = nh_.subscribe(odometry_topic_, 20, &BodyBevNode::odometryCallback, this);
+    }
 
-    ROS_INFO("FastLioBodyBev: subscribe %s, publish %s, frame_id=%s",
-             input_topic_.c_str(), output_topic_.c_str(), config.frame_id.c_str());
+    ROS_INFO("FastLioBodyBev: cloud=%s, odometry=%s, publish=%s, frame=%s",
+             input_topic_.c_str(),
+             use_odometry_frame_ ? odometry_topic_.c_str() : "(disabled)",
+             output_topic_.c_str(),
+             (use_odometry_frame_ ? config.odometry_frame_id : config.body_frame_id).c_str());
   }
 
 private:
   ros::NodeHandle nh_;
   ros::NodeHandle pnh_;
-  ros::Subscriber sub_;
+  ros::Subscriber cloud_sub_;
+  ros::Subscriber odom_sub_;
   ros::Publisher pub_;
   BodyBevBuilder builder_;
   std::string input_topic_;
+  std::string odometry_topic_;
   std::string output_topic_;
+  std::string odometry_frame_id_;
+  bool use_odometry_frame_ = true;
   double update_rate_hz_ = 10.0;
   ros::Time last_update_;
+  mutable std::mutex odometry_mutex_;
+  BodyBevBuilder::OdometryState latest_odometry_;
+
+  void odometryCallback(const nav_msgs::Odometry::ConstPtr& msg)
+  {
+    Eigen::Quaterniond q(msg->pose.pose.orientation.w,
+                         msg->pose.pose.orientation.x,
+                         msg->pose.pose.orientation.y,
+                         msg->pose.pose.orientation.z);
+    if (q.norm() < 1e-6) {
+      q = Eigen::Quaterniond::Identity();
+    } else {
+      q.normalize();
+    }
+
+    BodyBevBuilder::OdometryState odometry;
+    odometry.pose = Eigen::Isometry3d::Identity();
+    odometry.pose.linear() = q.toRotationMatrix();
+    odometry.pose.translation() = Eigen::Vector3d(msg->pose.pose.position.x,
+                                                  msg->pose.pose.position.y,
+                                                  msg->pose.pose.position.z);
+    odometry.stamp = msg->header.stamp;
+    odometry.frame_id =
+      msg->header.frame_id.empty() ? odometry_frame_id_ : msg->header.frame_id;
+    odometry.valid = true;
+
+    std::lock_guard<std::mutex> lock(odometry_mutex_);
+    latest_odometry_ = odometry;
+  }
 
   void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg)
   {
@@ -870,7 +1059,23 @@ private:
       points.push_back(point);
     }
 
-    builder_.build(points, msg->header.stamp);
+    BodyBevBuilder::OdometryState odometry;
+    const BodyBevBuilder::OdometryState* odometry_ptr = nullptr;
+    if (use_odometry_frame_) {
+      std::lock_guard<std::mutex> lock(odometry_mutex_);
+      odometry = latest_odometry_;
+      if (odometry.valid) {
+        odometry_ptr = &odometry;
+      }
+    }
+
+    if (use_odometry_frame_ && odometry_ptr == nullptr) {
+      ROS_WARN_THROTTLE(2.0, "FastLioBodyBev: waiting for odometry topic %s; skip this cloud.",
+                        odometry_topic_.c_str());
+      return;
+    }
+
+    builder_.build(points, msg->header.stamp, odometry_ptr);
     builder_.publish(pub_);
     last_update_ = msg->header.stamp;
   }
