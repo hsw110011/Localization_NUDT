@@ -80,6 +80,11 @@ public:
     int accumulation_frame_count = 5;
     int count_saturation = 8;
     double distance_decay_alpha = 0.02;
+    double temporal_height_alpha = 0.35;
+    double temporal_height_max_jump = 0.35;
+    int height_smoothing_radius = 2;
+    double height_smoothing_max_delta = 0.35;
+    int height_smoothing_min_neighbors = 3;
     double edge_gradient_threshold = 1.0;
     double edge_min_height = 0.45;
     double edge_min_jump = 0.50;
@@ -116,6 +121,14 @@ public:
     config_.ground_min_points = std::max(3, config_.ground_min_points);
     config_.accumulation_frame_count = std::max(1, config_.accumulation_frame_count);
     config_.count_saturation = std::max(1, config_.count_saturation);
+    config_.temporal_height_alpha =
+      std::max(0.0, std::min(1.0, config_.temporal_height_alpha));
+    config_.temporal_height_max_jump = std::max(0.0, config_.temporal_height_max_jump);
+    config_.height_smoothing_radius =
+      std::max(0, std::min(5, config_.height_smoothing_radius));
+    config_.height_smoothing_max_delta = std::max(0.0, config_.height_smoothing_max_delta);
+    config_.height_smoothing_min_neighbors =
+      std::max(1, config_.height_smoothing_min_neighbors);
     config_.edge_gradient_threshold = std::max(0.0, config_.edge_gradient_threshold);
     config_.edge_min_height = std::max(0.0, config_.edge_min_height);
     config_.edge_min_jump = std::max(0.0, config_.edge_min_jump);
@@ -225,6 +238,7 @@ public:
     }
 
     fillMapFromHistory(center);
+    smoothRelativeHeightLayer();
     computeRobustEdges();
 
     if (config_.show_windows) {
@@ -292,6 +306,8 @@ private:
 
   struct CellHistory {
     std::deque<CellObservation> observations;
+    bool filtered_h_rel_valid = false;
+    float filtered_h_rel = 0.0f;
   };
 
   Config config_;
@@ -380,6 +396,32 @@ private:
     return static_cast<float>(sum / static_cast<double>(count));
   }
 
+  float filterRelativeHeight(CellHistory& history, float raw_h_rel) const
+  {
+    if (!std::isfinite(raw_h_rel)) {
+      return kNaN;
+    }
+
+    if (!history.filtered_h_rel_valid) {
+      history.filtered_h_rel = raw_h_rel;
+      history.filtered_h_rel_valid = true;
+      return history.filtered_h_rel;
+    }
+
+    float limited_h_rel = raw_h_rel;
+    if (config_.temporal_height_max_jump > 0.0) {
+      const float max_jump = static_cast<float>(config_.temporal_height_max_jump);
+      const float min_allowed = history.filtered_h_rel - max_jump;
+      const float max_allowed = history.filtered_h_rel + max_jump;
+      limited_h_rel = std::max(min_allowed, std::min(max_allowed, limited_h_rel));
+    }
+
+    const float alpha = static_cast<float>(config_.temporal_height_alpha);
+    history.filtered_h_rel =
+      (1.0f - alpha) * history.filtered_h_rel + alpha * limited_h_rel;
+    return history.filtered_h_rel;
+  }
+
   void fillMapFromHistory(const grid_map::Position& center)
   {
     auto& h_rel_layer = map_["H_rel_surf"];
@@ -391,8 +433,8 @@ private:
 
     std::vector<GlobalCellKey> cells_to_remove;
 
-    for (const auto& entry : cell_history_) {
-      const CellHistory& history = entry.second;
+    for (auto& entry : cell_history_) {
+      CellHistory& history = entry.second;
       const grid_map::Position cell_center = getGlobalCellCenter(entry.first);
       if (history.observations.empty() || !map_.isInside(cell_center)) {
         cells_to_remove.push_back(entry.first);
@@ -405,7 +447,8 @@ private:
         continue;
       }
 
-      const float h_rel = averageHistoryValue(history, &CellObservation::h_rel);
+      const float raw_h_rel = averageHistoryValue(history, &CellObservation::h_rel);
+      const float h_rel = filterRelativeHeight(history, raw_h_rel);
       if (!std::isfinite(h_rel)) {
         cells_to_remove.push_back(entry.first);
         continue;
@@ -413,12 +456,6 @@ private:
 
       const int row = index(0);
       const int col = index(1);
-      if (mask_layer(row, col) > 0.5f &&
-          std::isfinite(h_rel_layer(row, col)) &&
-          h_rel <= h_rel_layer(row, col)) {
-        continue;
-      }
-
       h_rel_layer(row, col) = h_rel;
       h_range_layer(row, col) = averageHistoryValue(history, &CellObservation::h_range);
       h_q_layer(row, col) = averageHistoryValue(history, &CellObservation::h_q);
@@ -429,6 +466,93 @@ private:
 
     for (const auto& key : cells_to_remove) {
       cell_history_.erase(key);
+    }
+  }
+
+  void smoothRelativeHeightLayer()
+  {
+    if (config_.height_smoothing_radius <= 0 || !map_.exists("H_rel_surf") ||
+        !map_.exists("M_L") || !map_.exists("W_L")) {
+      return;
+    }
+
+    auto& h_rel_layer = map_["H_rel_surf"];
+    const auto& mask_layer = map_["M_L"];
+    const auto& confidence_layer = map_["W_L"];
+    const int rows = map_.getSize()(0);
+    const int cols = map_.getSize()(1);
+    const std::size_t cell_count = static_cast<std::size_t>(rows * cols);
+    std::vector<float> smoothed(cell_count, kNaN);
+    std::vector<uint8_t> valid(cell_count, 0);
+
+    const int radius = config_.height_smoothing_radius;
+    const double max_delta = config_.height_smoothing_max_delta;
+
+    for (int row = 0; row < rows; ++row) {
+      for (int col = 0; col < cols; ++col) {
+        const float center_height = h_rel_layer(row, col);
+        if (mask_layer(row, col) <= 0.5f || !std::isfinite(center_height)) {
+          continue;
+        }
+
+        double weighted_sum = static_cast<double>(center_height) * 2.0;
+        double weight_sum = 2.0;
+        int accepted_neighbors = 1;
+
+        for (int dr = -radius; dr <= radius; ++dr) {
+          for (int dc = -radius; dc <= radius; ++dc) {
+            if (dr == 0 && dc == 0) {
+              continue;
+            }
+
+            const int neighbor_row = row + dr;
+            const int neighbor_col = col + dc;
+            if (neighbor_row < 0 || neighbor_row >= rows ||
+                neighbor_col < 0 || neighbor_col >= cols) {
+              continue;
+            }
+            if (mask_layer(neighbor_row, neighbor_col) <= 0.5f) {
+              continue;
+            }
+
+            const float neighbor_height = h_rel_layer(neighbor_row, neighbor_col);
+            if (!std::isfinite(neighbor_height)) {
+              continue;
+            }
+            if (max_delta > 0.0 &&
+                std::abs(static_cast<double>(neighbor_height - center_height)) > max_delta) {
+              continue;
+            }
+
+            const double distance_sq = static_cast<double>(dr * dr + dc * dc);
+            const float confidence = confidence_layer(neighbor_row, neighbor_col);
+            const double confidence_weight =
+              std::isfinite(confidence) ? std::max(0.1, static_cast<double>(confidence)) : 1.0;
+            const double spatial_weight = 1.0 / (1.0 + distance_sq);
+            const double weight = spatial_weight * confidence_weight;
+            weighted_sum += static_cast<double>(neighbor_height) * weight;
+            weight_sum += weight;
+            ++accepted_neighbors;
+          }
+        }
+
+        const std::size_t index = gridIndex(row, col, cols);
+        if (accepted_neighbors >= config_.height_smoothing_min_neighbors && weight_sum > 1e-6) {
+          smoothed[index] = static_cast<float>(weighted_sum / weight_sum);
+        } else {
+          smoothed[index] = center_height;
+        }
+        valid[index] = 1;
+      }
+    }
+
+    for (int row = 0; row < rows; ++row) {
+      for (int col = 0; col < cols; ++col) {
+        const std::size_t index = gridIndex(row, col, cols);
+        if (valid[index]) {
+          h_rel_layer(row, col) = smoothed[index];
+        }
+      }
     }
   }
 
@@ -971,6 +1095,11 @@ public:
     pnh_.param<int>("accumulation_frame_count", config.accumulation_frame_count, 5);
     pnh_.param<int>("count_saturation", config.count_saturation, 8);
     pnh_.param<double>("distance_decay_alpha", config.distance_decay_alpha, 0.02);
+    pnh_.param<double>("temporal_height_alpha", config.temporal_height_alpha, 0.35);
+    pnh_.param<double>("temporal_height_max_jump", config.temporal_height_max_jump, 0.35);
+    pnh_.param<int>("height_smoothing_radius", config.height_smoothing_radius, 2);
+    pnh_.param<double>("height_smoothing_max_delta", config.height_smoothing_max_delta, 0.35);
+    pnh_.param<int>("height_smoothing_min_neighbors", config.height_smoothing_min_neighbors, 3);
     pnh_.param<double>("edge_gradient_threshold", config.edge_gradient_threshold, 1.0);
     pnh_.param<double>("edge_min_height", config.edge_min_height, 0.45);
     pnh_.param<double>("edge_min_jump", config.edge_min_jump, 0.50);

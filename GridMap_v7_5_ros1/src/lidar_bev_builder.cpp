@@ -44,6 +44,12 @@ void LidarBevBuilder::configure(const Config& config)
     config_.height_quantile = std::max(0.0, std::min(1.0, config_.height_quantile));
     config_.ground_fallback_quantile =
         std::max(0.0, std::min(1.0, config_.ground_fallback_quantile));
+    config_.near_inner_radius = std::max(0.0, config_.near_inner_radius);
+    config_.near_outer_radius = std::max(config_.near_inner_radius, config_.near_outer_radius);
+    if (config_.ground_candidate_min_z > config_.ground_candidate_max_z) {
+        std::swap(config_.ground_candidate_min_z, config_.ground_candidate_max_z);
+    }
+    config_.ground_min_points = std::max(1, config_.ground_min_points);
     config_.accumulation_frame_count = std::max(1, config_.accumulation_frame_count);
     config_.count_saturation = std::max(1, config_.count_saturation);
     config_.edge_gradient_threshold = std::max(0.0, config_.edge_gradient_threshold);
@@ -295,12 +301,6 @@ void LidarBevBuilder::fillMapFromHistory(const grid_map::Position& center)
 
         const int row = index(0);
         const int col = index(1);
-        if (mask_layer(row, col) > 0.5f &&
-            std::isfinite(h_rel_layer(row, col)) &&
-            h_rel <= h_rel_layer(row, col)) {
-            continue;
-        }
-
         h_rel_layer(row, col) = h_rel;
         h_q_layer(row, col) = averageHistoryValue(history, &CellObservation::h_q);
         count_layer(row, col) = averageHistoryValue(history, &CellObservation::count);
@@ -785,7 +785,7 @@ void LidarBevBuilder::drawCenterMark(cv::Mat& image) const
 double LidarBevBuilder::estimateGroundReference(
     const std::vector<PreparedPoint>& points) const
 {
-    constexpr double kFrontHalfAngleRad = M_PI / 6.0;
+    constexpr double kFrontHalfAngleRad = M_PI / 12.0;
     constexpr std::size_t kReferencePointCount = 20;
 
     std::vector<std::pair<double, double>> front_candidates;
@@ -799,6 +799,15 @@ double LidarBevBuilder::estimateGroundReference(
         }
 
         const double distance_sq = point.car_x * point.car_x + point.car_y * point.car_y;
+        const double distance = std::sqrt(distance_sq);
+        if (distance < config_.near_inner_radius || distance > config_.near_outer_radius) {
+            continue;
+        }
+        if (point.car_z < config_.ground_candidate_min_z ||
+            point.car_z > config_.ground_candidate_max_z) {
+            continue;
+        }
+
         fallback_candidates.emplace_back(distance_sq, point.z);
 
         if (point.car_x <= 0.0) {
@@ -835,12 +844,18 @@ double LidarBevBuilder::estimateGroundReference(
             return z_sum / static_cast<double>(used_count);
         };
 
-    const double front_reference = averageNearestHeights(front_candidates);
+    const double front_reference =
+        front_candidates.size() >= static_cast<std::size_t>(config_.ground_min_points)
+            ? averageNearestHeights(front_candidates)
+            : std::numeric_limits<double>::quiet_NaN();
     if (std::isfinite(front_reference)) {
         return front_reference;
     }
 
-    const double fallback_reference = averageNearestHeights(fallback_candidates);
+    const double fallback_reference =
+        fallback_candidates.size() >= static_cast<std::size_t>(config_.ground_min_points)
+            ? averageNearestHeights(fallback_candidates)
+            : std::numeric_limits<double>::quiet_NaN();
     if (std::isfinite(fallback_reference)) {
         return fallback_reference;
     }
