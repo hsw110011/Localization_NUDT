@@ -13,9 +13,11 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <utility>
 
 namespace {
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+constexpr double kSurfaceTopHeightFraction = 0.15;  
 
 bool isFinite(double value)
 {
@@ -50,11 +52,8 @@ void LidarBevBuilder::configure(const Config& config)
         std::swap(config_.ground_candidate_min_z, config_.ground_candidate_max_z);
     }
     config_.ground_min_points = std::max(1, config_.ground_min_points);
-    config_.accumulation_frame_count = std::max(1, config_.accumulation_frame_count);
-    config_.count_saturation = std::max(1, config_.count_saturation);
-    config_.edge_gradient_threshold = std::max(0.0, config_.edge_gradient_threshold);
-    config_.edge_min_height = std::max(0.0, config_.edge_min_height);
-    config_.edge_min_jump = std::max(0.0, config_.edge_min_jump);
+    config_.cell_max_points = std::max(0, config_.cell_max_points);
+    config_.debug_window_stride = std::max(1, config_.debug_window_stride);
     config_.edge_min_valid_neighbors =
         std::max(1, std::min(9, config_.edge_min_valid_neighbors));
 }
@@ -64,13 +63,8 @@ void LidarBevBuilder::initializeMap(const std::string& frame_id, const grid_map:
     const std::vector<std::string> layers = {
         "H_rel_surf",
         "M_L",
-        "W_L",
-        "G_L",
         "G_long_L",
-        "G_lat_L",
-        "E_L",
-        "N_L",
-        "H_q"
+        "G_lat_L"
     };
 
     map_ = grid_map::GridMap(layers);
@@ -80,14 +74,9 @@ void LidarBevBuilder::initializeMap(const std::string& frame_id, const grid_map:
                      center);
 
     map_["H_rel_surf"].setConstant(kNaN);
-    map_["G_L"].setConstant(kNaN);
     map_["G_long_L"].setConstant(kNaN);
     map_["G_lat_L"].setConstant(kNaN);
-    map_["H_q"].setConstant(kNaN);
     map_["M_L"].setConstant(0.0f);
-    map_["W_L"].setConstant(0.0f);
-    map_["E_L"].setConstant(0.0f);
-    map_["N_L"].setConstant(0.0f);
 }
 
 void LidarBevBuilder::build(const std::vector<PointXYZRGBValid>& car_points,
@@ -96,17 +85,15 @@ void LidarBevBuilder::build(const std::vector<PointXYZRGBValid>& car_points,
     const bool use_odom =
         config_.use_odometry_frame && odometry != nullptr && odometry->valid;
 
-    const std::string frame_id = use_odom
-        ? (odometry->frame_id.empty() ? config_.odometry_frame_id : odometry->frame_id)
-        : config_.body_frame_id;
-
-    Eigen::Vector3d center_xyz = Eigen::Vector3d::Zero();
-    if (use_odom) {
-        center_xyz = odometry->pose.translation();
-    }
-    const grid_map::Position center(center_xyz.x(), center_xyz.y());
-    stamp_ = use_odom ? odometry->stamp : ros::Time::now();
-    display_pose_ = use_odom ? odometry->pose : Eigen::Isometry3d::Identity();
+    const std::string frame_id = config_.body_frame_id;
+    const grid_map::Position center(0.0, 0.0);
+    const Eigen::Isometry3d capture_pose =
+        use_odom ? odometry->pose : Eigen::Isometry3d::Identity();
+    const bool capture_pose_valid = use_odom;
+    const Eigen::Isometry3d current_pose =
+        capture_pose_valid ? capture_pose : Eigen::Isometry3d::Identity();
+    stamp_ = capture_pose_valid ? odometry->stamp : ros::Time::now();
+    display_pose_ = Eigen::Isometry3d::Identity();
     display_pose_valid_ = true;
 
     initializeMap(frame_id, center);
@@ -147,170 +134,212 @@ void LidarBevBuilder::build(const std::vector<PointXYZRGBValid>& car_points,
 
     const double ground_reference = estimateGroundReference(prepared_points);
 
-    std::unordered_map<GlobalCellKey, CellAccumulator, GlobalCellKeyHash> current_cells;
-
-    for (const auto& point : prepared_points) {
-        if (!map_.isInside(grid_map::Position(point.x, point.y))) {
-            continue;
-        }
-
-        const GlobalCellKey key = makeGlobalCellKey(point.x, point.y);
-        CellAccumulator& cell = current_cells[key];
-        cell.max_z = std::max(cell.max_z, static_cast<float>(point.z));
-        ++cell.count;
-    }
-
-    for (auto& entry : current_cells) {
-        CellAccumulator& cell = entry.second;
-        if (cell.count <= 0) {
-            continue;
-        }
-
-        const float h_max = cell.max_z;
-        const float h_rel = static_cast<float>(static_cast<double>(h_max) - ground_reference);
-        const grid_map::Position cell_center = getGlobalCellCenter(entry.first);
-        const double dx = cell_center.x() - center.x();
-        const double dy = cell_center.y() - center.y();
-        const double distance = std::sqrt(dx * dx + dy * dy);
-        const double count_weight =
-            std::min(static_cast<double>(cell.count) /
-                         static_cast<double>(config_.count_saturation),
-                     1.0);
-        const double distance_weight = std::exp(-config_.distance_decay_alpha * distance);
-
-        CellObservation observation;
-        observation.stamp = stamp_;
-        observation.h_rel = h_rel;
-        observation.h_q = h_max;
-        observation.count = static_cast<float>(cell.count);
-        observation.confidence = static_cast<float>(count_weight * distance_weight);
-        addObservationToHistory(entry.first, observation);
-    }
-
-    fillMapFromHistory(center);
-    computeRobustEdges();
+    addFrameToHistory(capture_pose, capture_pose_valid, stamp_, prepared_points);
+    pruneFrameHistoryCellPointLimit(current_pose, capture_pose_valid);
+    fillMapFromFrameHistory(current_pose, capture_pose_valid, ground_reference);
+    computeDirectionalGradients();
 
     if (config_.show_windows) {
         showDebugWindows();
     }
 }
 
-std::size_t LidarBevBuilder::GlobalCellKeyHash::operator()(
-    const LidarBevBuilder::GlobalCellKey& key) const noexcept
+void LidarBevBuilder::addFrameToHistory(
+    const Eigen::Isometry3d& capture_pose,
+    bool pose_valid,
+    const ros::Time& stamp,
+    const std::vector<PreparedPoint>& points)
 {
-    const std::size_t col_hash = std::hash<int>{}(key.col);
-    const std::size_t row_hash = std::hash<int>{}(key.row);
-    return col_hash ^ (row_hash + 0x9e3779b9u + (col_hash << 6) + (col_hash >> 2));
-}
-
-LidarBevBuilder::GlobalCellKey LidarBevBuilder::makeGlobalCellKey(double x, double y) const
-{
-    GlobalCellKey key;
-    key.col = static_cast<int>(std::floor(x / config_.resolution));
-    key.row = static_cast<int>(std::floor(y / config_.resolution));
-    return key;
-}
-
-grid_map::Position LidarBevBuilder::getGlobalCellCenter(const GlobalCellKey& key) const
-{
-    return grid_map::Position((static_cast<double>(key.col) + 0.5) * config_.resolution,
-                              (static_cast<double>(key.row) + 0.5) * config_.resolution);
-}
-
-void LidarBevBuilder::addObservationToHistory(const GlobalCellKey& key,
-                                              const CellObservation& observation)
-{
-    CellObservation stamped_observation = observation;
-    if (stamped_observation.stamp.isZero()) {
-        stamped_observation.stamp = ros::Time::now();
+    if (!pose_valid) {
+        frame_history_.clear();
+    } else if (!frame_history_.empty() && !frame_history_.back().pose_valid) {
+        frame_history_.clear();
     }
 
-    CellHistory& history = cell_history_[key];
-    history.observations.push_back(stamped_observation);
+    FrameObservation frame;
+    frame.pose = capture_pose;
+    frame.stamp = stamp;
+    frame.pose_valid = pose_valid;
 
-    std::stable_sort(history.observations.begin(),
-                     history.observations.end(),
-                     [](const CellObservation& lhs, const CellObservation& rhs) {
-                         return lhs.stamp < rhs.stamp;
-                     });
-
-    while (history.observations.size() >
-           static_cast<std::size_t>(config_.accumulation_frame_count)) {
-        history.observations.pop_front();
+    frame.points.reserve(points.size());
+    for (const auto& point : points) {
+        frame.points.push_back(StoredPoint{point.car_x, point.car_y, point.car_z});
     }
+
+    frame_history_.push_back(std::move(frame));
 }
 
-float LidarBevBuilder::averageHistoryValue(const CellHistory& history,
-                                           float CellObservation::*member) const
+void LidarBevBuilder::pruneFrameHistoryCellPointLimit(
+    const Eigen::Isometry3d& current_pose,
+    bool current_pose_valid)
 {
-    if (history.observations.empty()) {
-        return kNaN;
+    const int rows = map_.getSize()(0);
+    const int cols = map_.getSize()(1);
+    const std::size_t cell_count = static_cast<std::size_t>(rows * cols);
+    if (cell_keep_counts_.size() != cell_count) {
+        cell_keep_counts_.assign(cell_count, 0);
+    } else {
+        std::fill(cell_keep_counts_.begin(), cell_keep_counts_.end(), 0);
     }
 
-    double sum = 0.0;
-    std::size_t count = 0;
-    for (const auto& observation : history.observations) {
-        const float value = observation.*member;
-        if (!std::isfinite(value)) {
+    const bool limit_cell_points = config_.cell_max_points > 0;
+    const Eigen::Isometry3d current_pose_inverse = current_pose.inverse();
+
+    for (auto frame_it = frame_history_.rbegin(); frame_it != frame_history_.rend(); ++frame_it) {
+        FrameObservation& frame = *frame_it;
+        if (current_pose_valid != frame.pose_valid) {
+            frame.points.clear();
             continue;
         }
-        sum += static_cast<double>(value);
-        ++count;
+
+        Eigen::Isometry3d frame_to_current = Eigen::Isometry3d::Identity();
+        if (current_pose_valid && frame.pose_valid) {
+            frame_to_current = current_pose_inverse * frame.pose;
+        }
+
+        std::vector<StoredPoint> kept_reversed;
+        kept_reversed.reserve(frame.points.size());
+
+        for (auto point_it = frame.points.rbegin(); point_it != frame.points.rend(); ++point_it) {
+            Eigen::Vector3d local_point(point_it->x, point_it->y, point_it->z);
+            local_point = frame_to_current * local_point;
+
+            if (!std::isfinite(local_point.x()) || !std::isfinite(local_point.y())) {
+                continue;
+            }
+
+            grid_map::Index index;
+            if (!map_.getIndex(grid_map::Position(local_point.x(), local_point.y()), index)) {
+                continue;
+            }
+
+            if (limit_cell_points) {
+                const std::size_t linear_index = gridIndex(index(0), index(1), cols);
+                int& kept_count = cell_keep_counts_[linear_index];
+                if (kept_count >= config_.cell_max_points) {
+                    continue;
+                }
+                ++kept_count;
+            }
+
+            kept_reversed.push_back(*point_it);
+        }
+
+        frame.points.assign(kept_reversed.rbegin(), kept_reversed.rend());
     }
 
-    if (count == 0) {
-        return kNaN;
-    }
-    return static_cast<float>(sum / static_cast<double>(count));
+    frame_history_.erase(
+        std::remove_if(frame_history_.begin(),
+                       frame_history_.end(),
+                       [](const FrameObservation& frame) {
+                           return frame.points.empty();
+                       }),
+        frame_history_.end());
 }
 
-void LidarBevBuilder::fillMapFromHistory(const grid_map::Position& center)
+void LidarBevBuilder::fillMapFromFrameHistory(
+    const Eigen::Isometry3d& current_pose,
+    bool current_pose_valid,
+    double ground_reference)
 {
     auto& h_rel_layer = map_["H_rel_surf"];
     auto& mask_layer = map_["M_L"];
-    auto& confidence_layer = map_["W_L"];
-    auto& count_layer = map_["N_L"];
-    auto& h_q_layer = map_["H_q"];
 
-    std::vector<GlobalCellKey> cells_to_remove;
-
-    for (const auto& entry : cell_history_) {
-        const CellHistory& history = entry.second;
-        if (history.observations.empty()) {
-            cells_to_remove.push_back(entry.first);
-            continue;
+    const int rows = map_.getSize()(0);
+    const int cols = map_.getSize()(1);
+    const std::size_t cell_count = static_cast<std::size_t>(rows * cols);
+    if (cell_accumulators_.size() != cell_count) {
+        cell_accumulators_.clear();
+        cell_accumulators_.resize(cell_count);
+        active_cell_indices_.clear();
+    } else {
+        for (const std::size_t index : active_cell_indices_) {
+            CellAccumulator& cell = cell_accumulators_[index];
+            cell.count = 0;
+            cell.top_heights.clear();
         }
-
-        const grid_map::Position cell_center = getGlobalCellCenter(entry.first);
-        if (!map_.isInside(cell_center)) {
-            cells_to_remove.push_back(entry.first);
-            continue;
-        }
-
-        grid_map::Index index;
-        if (!map_.getIndex(cell_center, index)) {
-            cells_to_remove.push_back(entry.first);
-            continue;
-        }
-
-        const float h_rel = averageHistoryValue(history, &CellObservation::h_rel);
-        if (!std::isfinite(h_rel)) {
-            cells_to_remove.push_back(entry.first);
-            continue;
-        }
-
-        const int row = index(0);
-        const int col = index(1);
-        h_rel_layer(row, col) = h_rel;
-        h_q_layer(row, col) = averageHistoryValue(history, &CellObservation::h_q);
-        count_layer(row, col) = averageHistoryValue(history, &CellObservation::count);
-        confidence_layer(row, col) =
-            averageHistoryValue(history, &CellObservation::confidence);
-        mask_layer(row, col) = 1.0f;
+        active_cell_indices_.clear();
     }
 
-    for (const auto& key : cells_to_remove) {
-        cell_history_.erase(key);
+    const int max_top_height_count = config_.cell_max_points > 0
+        ? std::max(1,
+                   static_cast<int>(
+                       std::ceil(kSurfaceTopHeightFraction *
+                                 static_cast<double>(config_.cell_max_points))))
+        : 0;
+    const Eigen::Isometry3d current_pose_inverse = current_pose.inverse();
+
+    for (const auto& frame : frame_history_) {
+        if (current_pose_valid != frame.pose_valid) {
+            continue;
+        }
+
+        Eigen::Isometry3d frame_to_current = Eigen::Isometry3d::Identity();
+        if (current_pose_valid && frame.pose_valid) {
+            frame_to_current = current_pose_inverse * frame.pose;
+        }
+
+        for (const auto& point : frame.points) {
+            Eigen::Vector3d local_point(point.x, point.y, point.z);
+            local_point = frame_to_current * local_point;
+
+            grid_map::Index index;
+            if (!map_.getIndex(grid_map::Position(local_point.x(), local_point.y()), index)) {
+                continue;
+            }
+
+            const std::size_t linear_index = gridIndex(index(0), index(1), cols);
+            CellAccumulator& cell = cell_accumulators_[linear_index];
+            if (cell.count == 0) {
+                active_cell_indices_.push_back(linear_index);
+            }
+            const float z = static_cast<float>(local_point.z());
+            ++cell.count;
+            addTopHeight(cell, z, max_top_height_count);
+        }
+    }
+
+    for (const std::size_t linear_index : active_cell_indices_) {
+        CellAccumulator& cell = cell_accumulators_[linear_index];
+        if (cell.count <= 0) {
+            continue;
+        }
+
+        const int row = static_cast<int>(linear_index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(linear_index % static_cast<std::size_t>(cols));
+        const float h_q =
+            static_cast<float>(
+                meanTopHeightFraction(cell.top_heights,
+                                      kSurfaceTopHeightFraction,
+                                      cell.count));
+        const float h_rel =
+            static_cast<float>(static_cast<double>(h_q) - ground_reference);
+        if (!std::isfinite(h_rel)) {
+            continue;
+        }
+
+        h_rel_layer(row, col) = h_rel;
+        mask_layer(row, col) = 1.0f;
+    }
+}
+
+void LidarBevBuilder::addTopHeight(CellAccumulator& cell,
+                                   float height,
+                                   int max_top_count) const
+{
+    if (!std::isfinite(height)) {
+        return;
+    }
+
+    if (max_top_count <= 0 ||
+        cell.top_heights.size() < static_cast<std::size_t>(max_top_count)) {
+        cell.top_heights.push_back(height);
+        return;
+    }
+
+    auto min_it = std::min_element(cell.top_heights.begin(), cell.top_heights.end());
+    if (min_it != cell.top_heights.end() && height > *min_it) {
+        *min_it = height;
     }
 }
 
@@ -324,19 +353,15 @@ bool LidarBevBuilder::shouldRejectEgoPoint(const PointXYZRGBValid& point) const
            point.y >= config_.ego_box_min_y && point.y <= config_.ego_box_max_y;
 }
 
-void LidarBevBuilder::computeRobustEdges()
+void LidarBevBuilder::computeDirectionalGradients()
 {
     auto& h_rel_layer = map_["H_rel_surf"];
     auto& mask_layer = map_["M_L"];
-    auto& gradient_layer = map_["G_L"];
     auto& longitudinal_gradient_layer = map_["G_long_L"];
     auto& lateral_gradient_layer = map_["G_lat_L"];
-    auto& edge_layer = map_["E_L"];
 
-    gradient_layer.setConstant(kNaN);
     longitudinal_gradient_layer.setConstant(kNaN);
     lateral_gradient_layer.setConstant(kNaN);
-    edge_layer.setConstant(0.0f);
 
     const int rows = map_.getSize()(0);
     const int cols = map_.getSize()(1);
@@ -345,42 +370,42 @@ void LidarBevBuilder::computeRobustEdges()
     std::vector<float> smoothed_height(cell_count, kNaN);
     std::vector<uint8_t> smoothed_valid(cell_count, 0);
 
-    for (int row = 0; row < rows; ++row) {
-        for (int col = 0; col < cols; ++col) {
-            if (mask_layer(row, col) <= 0.5f || !std::isfinite(h_rel_layer(row, col))) {
-                continue;
-            }
-
-            std::array<float, 9> values;
-            int value_count = 0;
-            for (int dr = -1; dr <= 1; ++dr) {
-                for (int dc = -1; dc <= 1; ++dc) {
-                    const int neighbor_row = row + dr;
-                    const int neighbor_col = col + dc;
-                    if (neighbor_row < 0 || neighbor_row >= rows ||
-                        neighbor_col < 0 || neighbor_col >= cols) {
-                        continue;
-                    }
-                    if (mask_layer(neighbor_row, neighbor_col) <= 0.5f ||
-                        !std::isfinite(h_rel_layer(neighbor_row, neighbor_col))) {
-                        continue;
-                    }
-                    values[static_cast<std::size_t>(value_count)] =
-                        h_rel_layer(neighbor_row, neighbor_col);
-                    ++value_count;
-                }
-            }
-
-            if (value_count < config_.edge_min_valid_neighbors) {
-                continue;
-            }
-
-            std::sort(values.begin(), values.begin() + value_count);
-            const float median_height = values[static_cast<std::size_t>(value_count / 2)];
-            const std::size_t index = gridIndex(row, col, cols);
-            smoothed_height[index] = median_height;
-            smoothed_valid[index] = 1;
+    // Smooth H_rel_surf with a 3x3 median before Sobel gradients.
+    for (const std::size_t index : active_cell_indices_) {
+        const int row = static_cast<int>(index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(index % static_cast<std::size_t>(cols));
+        if (mask_layer(row, col) <= 0.5f || !std::isfinite(h_rel_layer(row, col))) {
+            continue;
         }
+
+        std::array<float, 9> values;
+        int value_count = 0;
+        for (int dr = -1; dr <= 1; ++dr) {
+            for (int dc = -1; dc <= 1; ++dc) {
+                const int neighbor_row = row + dr;
+                const int neighbor_col = col + dc;
+                if (neighbor_row < 0 || neighbor_row >= rows ||
+                    neighbor_col < 0 || neighbor_col >= cols) {
+                    continue;
+                }
+                if (mask_layer(neighbor_row, neighbor_col) <= 0.5f ||
+                    !std::isfinite(h_rel_layer(neighbor_row, neighbor_col))) {
+                    continue;
+                }
+                values[static_cast<std::size_t>(value_count)] =
+                    h_rel_layer(neighbor_row, neighbor_col);
+                ++value_count;
+            }
+        }
+
+        if (value_count < config_.edge_min_valid_neighbors) {
+            continue;
+        }
+
+        std::sort(values.begin(), values.begin() + value_count);
+        const float median_height = values[static_cast<std::size_t>(value_count / 2)];
+        smoothed_height[index] = median_height;
+        smoothed_valid[index] = 1;
     }
 
     static const int sobel_x[3][3] = {
@@ -394,153 +419,103 @@ void LidarBevBuilder::computeRobustEdges()
         {1, 2, 1}
     };
 
-
-    for (int row = 0; row < rows; ++row) {
-        for (int col = 0; col < cols; ++col) {
-            const std::size_t index = gridIndex(row, col, cols);
-            if (!smoothed_valid[index]) {
-                continue;
-            }
-
-            const float center_height = smoothed_height[index];
-            int valid_neighbor_count = 0;
-            double grad_index1 = 0.0;
-            double grad_index0 = 0.0;
-
-            for (int dr = -1; dr <= 1; ++dr) {
-                for (int dc = -1; dc <= 1; ++dc) {
-                    const int neighbor_row = row + dr;
-                    const int neighbor_col = col + dc;
-                    float value = center_height;
-
-                    if (neighbor_row >= 0 && neighbor_row < rows &&
-                        neighbor_col >= 0 && neighbor_col < cols) {
-                        const std::size_t neighbor_index =
-                            gridIndex(neighbor_row, neighbor_col, cols);
-                        if (smoothed_valid[neighbor_index]) {
-                            value = smoothed_height[neighbor_index];
-                            ++valid_neighbor_count;
-                        }
-                    }
-
-                    grad_index1 += static_cast<double>(sobel_x[dr + 1][dc + 1]) *
-                                   static_cast<double>(value);
-                    grad_index0 += static_cast<double>(sobel_y[dr + 1][dc + 1]) *
-                                   static_cast<double>(value);
-                }
-            }
-
-            if (valid_neighbor_count < config_.edge_min_valid_neighbors) {
-                continue;
-            }
-
-            grid_map::Position center_position;
-            grid_map::Position index0_position;
-            grid_map::Position index1_position;
-            const bool has_center_position =
-                map_.getPosition(grid_map::Index(row, col), center_position);
-            const bool has_index0_direction =
-                row + 1 < rows &&
-                map_.getPosition(grid_map::Index(row + 1, col), index0_position);
-            const bool has_index1_direction =
-                col + 1 < cols &&
-                map_.getPosition(grid_map::Index(row, col + 1), index1_position);
-
-            Eigen::Vector2d index0_unit(1.0, 0.0);
-            Eigen::Vector2d index1_unit(0.0, 1.0);
-            if (has_center_position && has_index0_direction) {
-                index0_unit =
-                    Eigen::Vector2d(index0_position.x() - center_position.x(),
-                                    index0_position.y() - center_position.y());
-                if (index0_unit.norm() > 1e-6) {
-                    index0_unit.normalize();
-                }
-            }
-            if (has_center_position && has_index1_direction) {
-                index1_unit =
-                    Eigen::Vector2d(index1_position.x() - center_position.x(),
-                                    index1_position.y() - center_position.y());
-                if (index1_unit.norm() > 1e-6) {
-                    index1_unit.normalize();
-                }
-            }
-
-            const double index0_gradient =
-                grad_index0 / (8.0 * config_.resolution);
-            const double index1_gradient =
-                grad_index1 / (8.0 * config_.resolution);
-            const Eigen::Vector2d map_gradient =
-                index0_gradient * index0_unit + index1_gradient * index1_unit;
-
-            Eigen::Vector2d longitudinal_unit(1.0, 0.0);
-            Eigen::Vector2d lateral_unit(0.0, 1.0);
-            if (display_pose_valid_) {
-                longitudinal_unit =
-                    Eigen::Vector2d(display_pose_.linear()(0, 0),
-                                    display_pose_.linear()(1, 0));
-                lateral_unit =
-                    Eigen::Vector2d(display_pose_.linear()(0, 1),
-                                    display_pose_.linear()(1, 1));
-                if (longitudinal_unit.norm() > 1e-6) {
-                    longitudinal_unit.normalize();
-                }
-                if (lateral_unit.norm() > 1e-6) {
-                    lateral_unit.normalize();
-                }
-            }
-
-            const float longitudinal_gradient =
-                static_cast<float>(map_gradient.dot(longitudinal_unit));
-            const float lateral_gradient =
-                static_cast<float>(map_gradient.dot(lateral_unit));
-            const float gradient = static_cast<float>(map_gradient.norm());
-
-            // Edge gating disabled temporarily: always output gradients on smoothed cells.
-            longitudinal_gradient_layer(row, col) = longitudinal_gradient;
-            lateral_gradient_layer(row, col) = lateral_gradient;
-            gradient_layer(row, col) = gradient;
+    Eigen::Vector2d index0_unit(1.0, 0.0);
+    Eigen::Vector2d index1_unit(0.0, 1.0);
+    const int reference_row = std::min(rows - 1, std::max(0, rows / 2));
+    const int reference_col = std::min(cols - 1, std::max(0, cols / 2));
+    grid_map::Position reference_position;
+    grid_map::Position index0_position;
+    grid_map::Position index1_position;
+    const bool has_reference_position =
+        map_.getPosition(grid_map::Index(reference_row, reference_col), reference_position);
+    if (has_reference_position && reference_row + 1 < rows &&
+        map_.getPosition(grid_map::Index(reference_row + 1, reference_col), index0_position)) {
+        index0_unit = Eigen::Vector2d(index0_position.x() - reference_position.x(),
+                                      index0_position.y() - reference_position.y());
+        if (index0_unit.norm() > 1e-6) {
+            index0_unit.normalize();
+        }
+    }
+    if (has_reference_position && reference_col + 1 < cols &&
+        map_.getPosition(grid_map::Index(reference_row, reference_col + 1), index1_position)) {
+        index1_unit = Eigen::Vector2d(index1_position.x() - reference_position.x(),
+                                      index1_position.y() - reference_position.y());
+        if (index1_unit.norm() > 1e-6) {
+            index1_unit.normalize();
         }
     }
 
-    // Edge layer (E_L) detection disabled temporarily.
-    /*
-    for (int row = 0; row < rows; ++row) {
-        for (int col = 0; col < cols; ++col) {
-            const std::size_t index = gridIndex(row, col, cols);
-            if (!edge_candidates[index]) {
-                continue;
-            }
+    Eigen::Vector2d longitudinal_unit(1.0, 0.0);
+    Eigen::Vector2d lateral_unit(0.0, 1.0);
+    if (display_pose_valid_) {
+        longitudinal_unit =
+            Eigen::Vector2d(display_pose_.linear()(0, 0),
+                            display_pose_.linear()(1, 0));
+        lateral_unit =
+            Eigen::Vector2d(display_pose_.linear()(0, 1),
+                            display_pose_.linear()(1, 1));
+        if (longitudinal_unit.norm() > 1e-6) {
+            longitudinal_unit.normalize();
+        }
+        if (lateral_unit.norm() > 1e-6) {
+            lateral_unit.normalize();
+        }
+    }
 
-            const float gradient = gradients[index];
-            bool local_peak = true;
-            for (int dr = -1; dr <= 1 && local_peak; ++dr) {
-                for (int dc = -1; dc <= 1; ++dc) {
-                    if (dr == 0 && dc == 0) {
-                        continue;
-                    }
-                    const int neighbor_row = row + dr;
-                    const int neighbor_col = col + dc;
-                    if (neighbor_row < 0 || neighbor_row >= rows ||
-                        neighbor_col < 0 || neighbor_col >= cols) {
-                        continue;
-                    }
+    for (const std::size_t index : active_cell_indices_) {
+        if (!smoothed_valid[index]) {
+            continue;
+        }
 
+        const int row = static_cast<int>(index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(index % static_cast<std::size_t>(cols));
+        const float center_height = smoothed_height[index];
+        int valid_neighbor_count = 0;
+        double grad_index1 = 0.0;
+        double grad_index0 = 0.0;
+
+        for (int dr = -1; dr <= 1; ++dr) {
+            for (int dc = -1; dc <= 1; ++dc) {
+                const int neighbor_row = row + dr;
+                const int neighbor_col = col + dc;
+                float value = center_height;
+
+                if (neighbor_row >= 0 && neighbor_row < rows &&
+                    neighbor_col >= 0 && neighbor_col < cols) {
                     const std::size_t neighbor_index =
                         gridIndex(neighbor_row, neighbor_col, cols);
-                    if (edge_candidates[neighbor_index] &&
-                        gradients[neighbor_index] > gradient + 1e-4f) {
-                        local_peak = false;
-                        break;
+                    if (smoothed_valid[neighbor_index]) {
+                        value = smoothed_height[neighbor_index];
+                        ++valid_neighbor_count;
                     }
                 }
-            }
 
-            if (local_peak) {
-                edge_layer(row, col) = 1.0f;
+                grad_index1 += static_cast<double>(sobel_x[dr + 1][dc + 1]) *
+                               static_cast<double>(value);
+                grad_index0 += static_cast<double>(sobel_y[dr + 1][dc + 1]) *
+                               static_cast<double>(value);
             }
         }
+
+        if (valid_neighbor_count < config_.edge_min_valid_neighbors) {
+            continue;
+        }
+
+        const double index0_gradient =
+            grad_index0 / (8.0 * config_.resolution);
+        const double index1_gradient =
+            grad_index1 / (8.0 * config_.resolution);
+        const Eigen::Vector2d map_gradient =
+            index0_gradient * index0_unit + index1_gradient * index1_unit;
+
+        const float longitudinal_gradient =
+            static_cast<float>(map_gradient.dot(longitudinal_unit));
+        const float lateral_gradient =
+            static_cast<float>(map_gradient.dot(lateral_unit));
+
+        longitudinal_gradient_layer(row, col) = longitudinal_gradient;
+        lateral_gradient_layer(row, col) = lateral_gradient;
     }
-    */
 }
 
 void LidarBevBuilder::showDebugWindows() const
@@ -549,10 +524,16 @@ void LidarBevBuilder::showDebugWindows() const
         return;
     }
 
-    static const std::array<std::string, 5> window_names = {
+    ++debug_window_counter_;
+    if (config_.debug_window_stride > 1 &&
+        debug_window_counter_ % config_.debug_window_stride != 0) {
+        cv::waitKey(1);
+        return;
+    }
+
+    static const std::array<std::string, 4> window_names = {
         "BEV Relative Surface Height Map (H_rel_surf)",
         "BEV Valid Observation Mask (M_L)",
-        "BEV Observation Confidence Map (W_L)",
         "BEV Longitudinal Height Gradient Map (G_long_L)",
         "BEV Lateral Height Gradient Map (G_lat_L)"
     };
@@ -566,9 +547,8 @@ void LidarBevBuilder::showDebugWindows() const
 
     cv::imshow(window_names[0], renderHeightLayer("H_rel_surf"));
     cv::imshow(window_names[1], renderBinaryLayer("M_L"));
-    cv::imshow(window_names[2], renderNormalizedLayer("W_L", 0.0, 1.0));
-    cv::imshow(window_names[3], renderHeightLayer("G_long_L"));
-    cv::imshow(window_names[4], renderHeightLayer("G_lat_L"));
+    cv::imshow(window_names[2], renderHeightLayer("G_long_L"));
+    cv::imshow(window_names[3], renderHeightLayer("G_lat_L"));
     cv::waitKey(1);
 }
 
@@ -609,44 +589,6 @@ cv::Mat LidarBevBuilder::renderHeightLayer(const std::string& layer_name) const
 
     drawCenterMark(image);
     return image;
-}
-
-cv::Mat LidarBevBuilder::renderNormalizedLayer(const std::string& layer_name,
-                                               double min_value,
-                                               double max_value) const
-{
-    const int rows = map_.getSize()(0);
-    const int cols = map_.getSize()(1);
-    cv::Mat color(rows, cols, CV_8UC3, cv::Scalar(0, 0, 0));
-
-    if (!map_.exists(layer_name) || !map_.exists("M_L") || max_value <= min_value) {
-        return color;
-    }
-
-    const auto& layer = map_[layer_name];
-    const auto& mask = map_["M_L"];
-    const double inv_range = 1.0 / (max_value - min_value);
-
-    for (int image_row = 0; image_row < rows; ++image_row) {
-        for (int image_col = 0; image_col < cols; ++image_col) {
-            grid_map::Index index;
-            if (!getVehicleFrameIndex(image_row, image_col, index)) {
-                continue;
-            }
-
-            const float value = layer(index(0), index(1));
-            if (mask(index(0), index(1)) <= 0.5f || !std::isfinite(value)) {
-                continue;
-            }
-
-            const double clipped = std::max(min_value, std::min(max_value, static_cast<double>(value)));
-            color.at<cv::Vec3b>(image_row, image_col) =
-                viridisColor((clipped - min_value) * inv_range);
-        }
-    }
-
-    drawCenterMark(color);
-    return color;
 }
 
 cv::Mat LidarBevBuilder::renderBinaryLayer(const std::string& layer_name) const
@@ -749,6 +691,19 @@ bool LidarBevBuilder::getVehicleFrameIndex(int image_row,
 
     const int image_rows = map_.getSize()(0);
     const int image_cols = map_.getSize()(1);
+    if (image_row < 0 || image_row >= image_rows ||
+        image_col < 0 || image_col >= image_cols) {
+        return false;
+    }
+
+    const bool identity_display =
+        display_pose_.translation().head<2>().norm() < 1e-9 &&
+        (display_pose_.linear() - Eigen::Matrix3d::Identity()).cwiseAbs().maxCoeff() < 1e-9;
+    if (identity_display) {
+        index = grid_map::Index(image_row, image_col);
+        return true;
+    }
+
     const double x_vehicle =
         0.5 * static_cast<double>(image_rows) * config_.resolution -
         (static_cast<double>(image_row) + 0.5) * config_.resolution;
@@ -808,7 +763,7 @@ double LidarBevBuilder::estimateGroundReference(
             continue;
         }
 
-        fallback_candidates.emplace_back(distance_sq, point.z);
+        fallback_candidates.emplace_back(distance_sq, point.car_z);
 
         if (point.car_x <= 0.0) {
             continue;
@@ -819,7 +774,7 @@ double LidarBevBuilder::estimateGroundReference(
             continue;
         }
 
-        front_candidates.emplace_back(distance_sq, point.z);
+        front_candidates.emplace_back(distance_sq, point.car_z);
     }
 
     auto averageNearestHeights =
@@ -861,6 +816,43 @@ double LidarBevBuilder::estimateGroundReference(
     }
 
     return 0.0;
+}
+
+double LidarBevBuilder::meanTopHeightFraction(std::vector<float> values,
+                                              double top_fraction,
+                                              int total_count) const
+{
+    values.erase(std::remove_if(values.begin(), values.end(),
+                                [](float value) { return !std::isfinite(value); }),
+                 values.end());
+    if (values.empty()) {
+        return 0.0;
+    }
+
+    if (!std::isfinite(top_fraction) || top_fraction <= 0.0) {
+        top_fraction = kSurfaceTopHeightFraction;
+    }
+    top_fraction = std::min(1.0, top_fraction);
+
+    const int bounded_count = std::max(1, total_count);
+    const std::size_t requested_count = std::max<std::size_t>(
+        1,
+        static_cast<std::size_t>(
+            std::ceil(top_fraction * static_cast<double>(bounded_count))));
+    const std::size_t used_count = std::min(requested_count, values.size());
+
+    if (used_count < values.size()) {
+        std::nth_element(values.begin(),
+                         values.begin() + static_cast<std::ptrdiff_t>(used_count - 1),
+                         values.end(),
+                         std::greater<float>());
+    }
+
+    double sum = 0.0;
+    for (std::size_t i = 0; i < used_count; ++i) {
+        sum += static_cast<double>(values[i]);
+    }
+    return sum / static_cast<double>(used_count);
 }
 
 double LidarBevBuilder::percentile(std::vector<float> values, double quantile) const

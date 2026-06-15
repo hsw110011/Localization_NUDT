@@ -15,6 +15,7 @@
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <atomic>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -42,7 +43,7 @@ class SensorMap
 {
 public:
     SensorMap() {};
-    ~SensorMap() {};
+    ~SensorMap();
     void Init();
     void Odemetry_callback(const nav_msgs::Odometry::ConstPtr& msg);
     void get_rostopic_state();
@@ -72,6 +73,7 @@ public:
     void Draw_img_map();
     void Draw_lidar_bev(const std::vector<PointXYZRGBValid> &colored_points);
     LidarBevBuilder::OdometryState getLatestLidarOdometry();
+    LidarBevBuilder::OdometryState getLocalPoseForBev();
     LidarBevBuilder::OdometryState getCurrentBevPose();
     Pose6D poseFromLocalPose(const self_state::LocalPose& pose) const;
     Eigen::Isometry3d pose6DToIsometry(const Pose6D& pose) const;
@@ -100,6 +102,12 @@ public:
     
 
 private:
+    struct LidarBevWorkItem {
+        std::vector<PointXYZRGBValid> points;
+        LidarBevBuilder::OdometryState pose;
+        bool valid = false;
+    };
+
     LidarMap lidar_map;
     GridMapHandler grid_map_handler;
     GridMapHandler_v2 grid_map_handler_v2;
@@ -129,10 +137,17 @@ private:
     ros::Publisher color_map_pub_;
     ros::Publisher obstacle_pub_;
     ros::Publisher lidar_bev_pub_;
+    std::thread lidar_bev_worker_thread_;
+    std::mutex lidar_bev_worker_mutex_;
+    std::condition_variable lidar_bev_worker_cv_;
+    LidarBevWorkItem pending_lidar_bev_work_;
+    bool has_pending_lidar_bev_work_ = false;
+    bool stop_lidar_bev_worker_ = false;
+    std::atomic<bool> lidar_bev_worker_busy_{false};
 
     //变量
     grid_map::GridMap grid_map_;  // 用来存储栅格地图
-    int64_t current_time;
+    int64_t current_time = 0;
 
     //选择车的类型，LM,HM,new_LM
     std::string choose_car;
@@ -163,6 +178,11 @@ private:
 
     // 冻结坐标成员变量
     geometry_msgs::Pose getCurrentLocalPose() const;
+    void startLidarBevWorker();
+    void stopLidarBevWorker();
+    void submitLidarBevWork(const std::vector<PointXYZRGBValid>& colored_points,
+                            const LidarBevBuilder::OdometryState& pose);
+    void lidarBevWorkerLoop();
     double frozen_x_ = 0.0;
     double frozen_y_ = 0.0;
     double frozen_theta_ = 0.0;

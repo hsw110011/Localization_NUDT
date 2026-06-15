@@ -228,12 +228,8 @@ public:
     double lidar_bev_ground_fallback_quantile = 0.35;
     int lidar_bev_ground_min_points = 30;
     double lidar_bev_height_quantile = 0.90;
-    int lidar_bev_accumulation_frame_count = 5;
-    int lidar_bev_count_saturation = 8;
-    double lidar_bev_distance_decay_alpha = 0.02;
-    double lidar_bev_edge_gradient_threshold = 1.0;
-    double lidar_bev_edge_min_height = 0.45;
-    double lidar_bev_edge_min_jump = 0.50;
+    int lidar_bev_cell_max_points = 80;
+    int lidar_bev_debug_window_stride = 2;
     int lidar_bev_edge_min_valid_neighbors = 4;
 
     // IMU去畸变相关配置

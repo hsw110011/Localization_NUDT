@@ -31,8 +31,8 @@ void GridMapHandler_v2::initialize(double map_size_x, double map_size_y,
     frame_id_ = frame_id;
 
     // 计算可视化参数
-    img_rows_ = static_cast<int>(map_size_y / resolution);
-    img_cols_ = static_cast<int>(map_size_x / resolution);
+    img_rows_ = std::max(1, static_cast<int>(std::round(map_size_y_ / resolution_)));
+    img_cols_ = std::max(1, static_cast<int>(std::round(map_size_x_ / resolution_)));
     scale_factor_ = img_rows_ / map_size_y_;  // 像素/米
     img_size_ = std::max(img_rows_, img_cols_);
 
@@ -1682,148 +1682,60 @@ void GridMapHandler_v2::generateSlopeColorMap(cv::Mat &slope_map, cv::Mat &has_d
 }
 
 void GridMapHandler_v2::opencv_showMaps(double current_heading) {
-    // 安全检查
     if(map_.getLayers().empty()) {
         std::cerr << "Error: GridMap not initialized!" << std::endl;
         return;
     }
-
-    // 检查必要的数据层是否存在
     if (!map_.exists("elevation")) {
         std::cerr << "Error: elevation layer not found!" << std::endl;
         return;
     }
 
-    // 获取地图尺寸 (500x500)
-    const auto map_size = map_.getSize();
-    const int rows = map_size(0);  // 500
-    const int cols = map_size(1);  // 500
-    // 重新整理内存布局
     auto start_time0 = std::chrono::high_resolution_clock::now();
     map_.convertToDefaultStartIndex();
     auto end_time0 = std::chrono::high_resolution_clock::now();
     auto duration0 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time0 - start_time0);
     // std::cout << "opencv_showMaps convertToDefaultStartIndex: " << duration0.count() << " ms" << std::endl;
 
-    // 步骤1: 直接获取原始高程矩阵，保持米值不被归一化
-    cv::Mat global_height_mat;
-
     auto start_time1 = std::chrono::high_resolution_clock::now();
-
-
-    // 注意：GridMap的getSize()返回(X,Y)，但OpenCV需要(rows,cols)即(Y,X)
-    int cv_rows = map_.getSize()(1);  // Y轴 → OpenCV的行数
-    int cv_cols = map_.getSize()(0);  // X轴 → OpenCV的列数
-
-    // 直接内存映射，保持原始米值
-    cv::Mat raw_elevation(cv_rows, cv_cols, CV_32FC1, map_["elevation"].data());
-
-    cv::transpose(raw_elevation, global_height_mat); 
-
-
-    // 使用OpenCV仿射变换直接旋转整张图像
-    vehicle_height_mat = cv::Mat::zeros(rows, cols, CV_32FC1);
-
-    // 计算旋转中心 (图像中心)
-    cv::Point2f center(cols / 2.0f, rows / 2.0f);
-
-    // 创建旋转矩阵 (逆旋转，角度转换为度数)
-    double angle_degrees = -current_heading * 180.0 / M_PI;  // 弧度转度数，逆旋转
-    cv::Mat rotation_matrix = cv::getRotationMatrix2D(center, angle_degrees, 1.0);
-
-    // 对高度差图像进行旋转变换 (包含NaN值)
-    cv::warpAffine(global_height_mat, vehicle_height_mat, rotation_matrix,
-                   cv::Size(cols, rows), cv::INTER_LINEAR, cv::BORDER_CONSTANT,
-                   cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
-
-    // 生成数据有效性掩码
-    cv::Mat global_has_data = cv::Mat::zeros(cv_rows, cv_cols, CV_8UC1);
-
-    // 遍历global_height_mat，检查哪些位置有有效数据
-    for(int row = 0; row < cv_rows; ++row) {
-        const float* height_ptr = vehicle_height_mat.ptr<float>(row);
-        uint8_t* data_ptr = global_has_data.ptr<uint8_t>(row);
-        for(int col = 0; col < cv_cols; ++col) {
-            if(!std::isnan(height_ptr[col])) {
-                data_ptr[col] = 255;  // 有效数据
-            }
-            // NaN值保持0 (无效数据)
-        }
-    }
+    cv::Mat vehicle_rgb_mat;
+    cv::Mat vehicle_has_data;
+    generateVisualization(vehicle_height_mat, vehicle_rgb_mat, vehicle_has_data, current_heading);
     auto mid_time1 = std::chrono::high_resolution_clock::now();
     auto duration_mid1 = std::chrono::duration_cast<std::chrono::milliseconds>(mid_time1 - start_time1);
-    // std::cout << "opencv_showMaps global_height_mat: " << duration_mid1.count() << " ms" << std::endl;
+    // std::cout << "opencv_showMaps target-grid height: " << duration_mid1.count() << " ms" << std::endl;
 
-    // 步骤3: 高度差BEV可视化暂时关闭。
-    // params->generateColorMap(vehicle_height_mat, global_has_data, "GridMap Height Diff");
+    // 高度差BEV可视化暂时关闭。
+    // params->generateColorMap(vehicle_height_mat, vehicle_has_data, "GridMap Height Diff");
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - mid_time1);
-    // std::cout << "opencv_showMaps global_height_mat 画图: " << duration1.count() << " ms" << std::endl;
+    // std::cout << "opencv_showMaps height draw: " << duration1.count() << " ms" << std::endl;
 
-    // 步骤4: 生成并显示RGB图
     auto start_time3 = std::chrono::high_resolution_clock::now();
-    if (map_.exists("rgb_r") && map_.exists("rgb_g") && map_.exists("rgb_b")) {
-        // 获取RGB三个通道的原始数据
-        cv::Mat raw_rgb_r(cv_rows, cv_cols, CV_32FC1, map_["rgb_r"].data());
-        cv::Mat raw_rgb_g(cv_rows, cv_cols, CV_32FC1, map_["rgb_g"].data());
-        cv::Mat raw_rgb_b(cv_rows, cv_cols, CV_32FC1, map_["rgb_b"].data());
-
-        // 转置对齐坐标系
-        cv::Mat global_rgb_r, global_rgb_g, global_rgb_b;
-        cv::transpose(raw_rgb_r, global_rgb_r);
-        cv::transpose(raw_rgb_g, global_rgb_g);
-        cv::transpose(raw_rgb_b, global_rgb_b);
-
-        // 旋转RGB图像到车体坐标系
-        cv::Mat vehicle_rgb_r, vehicle_rgb_g, vehicle_rgb_b;
-        cv::warpAffine(global_rgb_r, vehicle_rgb_r, rotation_matrix, cv::Size(cols, rows), cv::INTER_LINEAR);
-        cv::warpAffine(global_rgb_g, vehicle_rgb_g, rotation_matrix, cv::Size(cols, rows), cv::INTER_LINEAR);
-        cv::warpAffine(global_rgb_b, vehicle_rgb_b, rotation_matrix, cv::Size(cols, rows), cv::INTER_LINEAR);
-
-        // 转换为8位并合并为BGR图像
-        cv::Mat rgb_r_8u, rgb_g_8u, rgb_b_8u;
-        vehicle_rgb_r.convertTo(rgb_r_8u, CV_8UC1);
-        vehicle_rgb_g.convertTo(rgb_g_8u, CV_8UC1);
-        vehicle_rgb_b.convertTo(rgb_b_8u, CV_8UC1);
-
-        cv::Mat vehicle_rgb_mat;
-        std::vector<cv::Mat> rgb_channels = {rgb_b_8u, rgb_g_8u, rgb_r_8u}; // OpenCV使用BGR顺序
-        cv::merge(rgb_channels, vehicle_rgb_mat);
-
-        // 显示RGB图
+    if (!vehicle_rgb_mat.empty()) {
         auto mid_time3 = std::chrono::high_resolution_clock::now();
         auto duration_mid3 = std::chrono::duration_cast<std::chrono::milliseconds>(mid_time3 - start_time3);
-        // std::cout << "opencv_showMaps RGB图: " << duration_mid3.count() << " ms" << std::endl;
-        params->generateRGBMap(vehicle_rgb_mat, global_has_data, "GridMap RGB (Vehicle Frame)");
+        // std::cout << "opencv_showMaps target-grid RGB: " << duration_mid3.count() << " ms" << std::endl;
+        params->generateRGBMap(vehicle_rgb_mat, vehicle_has_data, "GridMap RGB (Vehicle Frame)");
         auto end_time3 = std::chrono::high_resolution_clock::now();
         auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time3 - mid_time3);
-        // std::cout << "opencv_showMaps RGB图 画图: " << duration3.count() << " ms" << std::endl;
+        // std::cout << "opencv_showMaps RGB draw: " << duration3.count() << " ms" << std::endl;
     }
 
-    // 步骤5: 生成并显示坡度图
     auto start_time4 = std::chrono::high_resolution_clock::now();
     if (map_.exists("slope")) {
-        // 获取坡度数据
-        cv::Mat raw_slope(cv_rows, cv_cols, CV_32FC1, map_["slope"].data());
-        cv::Mat global_slope_mat;
-        cv::transpose(raw_slope, global_slope_mat);
-
-        // 旋转坡度图到车体坐标系
         cv::Mat vehicle_slope_mat;
-        cv::warpAffine(global_slope_mat, vehicle_slope_mat, rotation_matrix,
-                       cv::Size(cols, rows), cv::INTER_LINEAR, cv::BORDER_CONSTANT,
-                       cv::Scalar(std::numeric_limits<float>::quiet_NaN()));
+        cv::Mat vehicle_slope_has_data = vehicle_has_data.clone();
+        generateSlopeVisualization(vehicle_slope_mat, vehicle_slope_has_data, current_heading);
 
-        // 显示坡度图
         auto mid_time4 = std::chrono::high_resolution_clock::now();
         auto duration_mid4 = std::chrono::duration_cast<std::chrono::milliseconds>(mid_time4 - start_time4);
-        // std::cout << "opencv_showMaps 坡度图: " << duration_mid4.count() << " ms" << std::endl;
-        generateSlopeColorMap(vehicle_slope_mat, global_has_data, "GridMap Slope (Vehicle Frame)");
+        // std::cout << "opencv_showMaps target-grid slope: " << duration_mid4.count() << " ms" << std::endl;
+        generateSlopeColorMap(vehicle_slope_mat, vehicle_slope_has_data, "GridMap Slope (Vehicle Frame)");
         auto end_time4 = std::chrono::high_resolution_clock::now();
         auto duration4 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time4 - mid_time4);
-        // std::cout << "opencv_showMaps 坡度图 画图: " << duration4.count() << " ms" << std::endl;
+        // std::cout << "opencv_showMaps slope draw: " << duration4.count() << " ms" << std::endl;
     }
-
 }
 
 

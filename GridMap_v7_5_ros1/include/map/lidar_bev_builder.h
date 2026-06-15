@@ -9,11 +9,10 @@
 #include <opencv2/opencv.hpp>
 #include <ros/ros.h>
 
-#include <deque>
 #include <cstddef>
+#include <deque>
 #include <limits>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -50,12 +49,8 @@ public:
         int ground_min_points = 30;
 
         double height_quantile = 0.90;
-        int accumulation_frame_count = 5;
-        int count_saturation = 8;
-        double distance_decay_alpha = 0.02;
-        double edge_gradient_threshold = 1.0;
-        double edge_min_height = 0.45;
-        double edge_min_jump = 0.50;
+        int cell_max_points = 80;
+        int debug_window_stride = 2;
         int edge_min_valid_neighbors = 4;
     };
 
@@ -87,34 +82,21 @@ private:
     };
 
     struct CellAccumulator {
-        float max_z = -std::numeric_limits<float>::max();
         int count = 0;
+        std::vector<float> top_heights;
     };
 
-    struct GlobalCellKey {
-        int col = 0;
-        int row = 0;
-
-        bool operator==(const GlobalCellKey& other) const
-        {
-            return col == other.col && row == other.row;
-        }
+    struct StoredPoint {
+        double x = 0.0;
+        double y = 0.0;
+        double z = 0.0;
     };
 
-    struct GlobalCellKeyHash {
-        std::size_t operator()(const GlobalCellKey& key) const noexcept;
-    };
-
-    struct CellObservation {
+    struct FrameObservation {
+        Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
         ros::Time stamp;
-        float h_rel = 0.0f;
-        float h_q = 0.0f;
-        float count = 0.0f;
-        float confidence = 0.0f;
-    };
-
-    struct CellHistory {
-        std::deque<CellObservation> observations;
+        bool pose_valid = false;
+        std::vector<StoredPoint> points;
     };
 
     Config config_;
@@ -122,21 +104,27 @@ private:
     ros::Time stamp_;
     Eigen::Isometry3d display_pose_ = Eigen::Isometry3d::Identity();
     bool display_pose_valid_ = false;
-    std::unordered_map<GlobalCellKey, CellHistory, GlobalCellKeyHash> cell_history_;
+    std::deque<FrameObservation> frame_history_;
+    std::vector<CellAccumulator> cell_accumulators_;
+    std::vector<std::size_t> active_cell_indices_;
+    std::vector<int> cell_keep_counts_;
+    mutable int debug_window_counter_ = 0;
 
     void initializeMap(const std::string& frame_id, const grid_map::Position& center);
-    GlobalCellKey makeGlobalCellKey(double x, double y) const;
-    grid_map::Position getGlobalCellCenter(const GlobalCellKey& key) const;
-    void addObservationToHistory(const GlobalCellKey& key, const CellObservation& observation);
-    void fillMapFromHistory(const grid_map::Position& center);
-    float averageHistoryValue(const CellHistory& history, float CellObservation::*member) const;
+    void addFrameToHistory(const Eigen::Isometry3d& capture_pose,
+                           bool pose_valid,
+                           const ros::Time& stamp,
+                           const std::vector<PreparedPoint>& points);
+    void pruneFrameHistoryCellPointLimit(const Eigen::Isometry3d& current_pose,
+                                         bool current_pose_valid);
+    void fillMapFromFrameHistory(const Eigen::Isometry3d& current_pose,
+                                 bool current_pose_valid,
+                                 double ground_reference);
+    void addTopHeight(CellAccumulator& cell, float height, int max_top_count) const;
     bool shouldRejectEgoPoint(const PointXYZRGBValid& point) const;
-    void computeRobustEdges();
+    void computeDirectionalGradients();
     void showDebugWindows() const;
     cv::Mat renderHeightLayer(const std::string& layer_name) const;
-    cv::Mat renderNormalizedLayer(const std::string& layer_name,
-                                  double min_value,
-                                  double max_value) const;
     cv::Mat renderBinaryLayer(const std::string& layer_name) const;
     cv::Vec3b viridisColor(double normalized_value) const;
     std::pair<double, double> getRobustLayerRange(const std::string& layer_name,
@@ -145,6 +133,9 @@ private:
     bool getVehicleFrameIndex(int image_row, int image_col, grid_map::Index& index) const;
     void drawCenterMark(cv::Mat& image) const;
     double estimateGroundReference(const std::vector<PreparedPoint>& points) const;
+    double meanTopHeightFraction(std::vector<float> values,
+                                 double top_fraction,
+                                 int total_count) const;
     double percentile(std::vector<float> values, double quantile) const;
     bool isFinitePoint(const PointXYZRGBValid& point) const;
 };

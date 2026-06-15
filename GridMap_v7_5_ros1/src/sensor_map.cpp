@@ -28,6 +28,12 @@ Pose6D poseFromIsometry(double timestamp, const Eigen::Isometry3d& pose)
 }
 }  // namespace
 
+SensorMap::~SensorMap()
+{
+    stop_flag = true;
+    stopLidarBevWorker();
+}
+
 void SensorMap::Init()
 {
     params->readPara();
@@ -97,14 +103,11 @@ void SensorMap::Init()
     bev_config.ground_fallback_quantile = params->lidar_bev_ground_fallback_quantile;
     bev_config.ground_min_points = params->lidar_bev_ground_min_points;
     bev_config.height_quantile = params->lidar_bev_height_quantile;
-    bev_config.accumulation_frame_count = params->lidar_bev_accumulation_frame_count;
-    bev_config.count_saturation = params->lidar_bev_count_saturation;
-    bev_config.distance_decay_alpha = params->lidar_bev_distance_decay_alpha;
-    bev_config.edge_gradient_threshold = params->lidar_bev_edge_gradient_threshold;
-    bev_config.edge_min_height = params->lidar_bev_edge_min_height;
-    bev_config.edge_min_jump = params->lidar_bev_edge_min_jump;
+    bev_config.cell_max_points = params->lidar_bev_cell_max_points;
+    bev_config.debug_window_stride = params->lidar_bev_debug_window_stride;
     bev_config.edge_min_valid_neighbors = params->lidar_bev_edge_min_valid_neighbors;
     lidar_bev_builder.configure(bev_config);
+    startLidarBevWorker();
 
     grid_map_.setFrameId("ars548");
     grid_map_.setGeometry(grid_map::Length(x_max - x_min, y_max - y_min), grid_size);
@@ -198,21 +201,8 @@ Eigen::Isometry3d SensorMap::pose6DToIsometry(const Pose6D& pose) const
     return transform;
 }
 
-LidarBevBuilder::OdometryState SensorMap::getCurrentBevPose()
+LidarBevBuilder::OdometryState SensorMap::getLocalPoseForBev()
 {
-    if (params->lidar_bev_pose_source == "body") {
-        LidarBevBuilder::OdometryState body_state;
-        body_state.valid = true;
-        body_state.stamp = ros::Time::now();
-        body_state.frame_id = params->lidar_bev_body_frame_id;
-        body_state.pose = Eigen::Isometry3d::Identity();
-        return body_state;
-    }
-
-    if (params->lidar_bev_pose_source == "odometry") {
-        return getLatestLidarOdometry();
-    }
-
     LidarBevBuilder::OdometryState localpose_state;
     localpose_state.valid = local_pose_valid_.load();
     if (!localpose_state.valid) {
@@ -236,6 +226,113 @@ LidarBevBuilder::OdometryState SensorMap::getCurrentBevPose()
     }
 
     return localpose_state;
+}
+
+LidarBevBuilder::OdometryState SensorMap::getCurrentBevPose()
+{
+    if (params->lidar_bev_pose_source == "body") {
+        LidarBevBuilder::OdometryState body_state;
+        body_state.valid = true;
+        body_state.stamp = ros::Time::now();
+        body_state.frame_id = params->lidar_bev_body_frame_id;
+        body_state.pose = Eigen::Isometry3d::Identity();
+        return body_state;
+    }
+
+    if (params->lidar_bev_pose_source == "odometry") {
+        return getLatestLidarOdometry();
+    }
+
+    return getLocalPoseForBev();
+}
+
+void SensorMap::startLidarBevWorker()
+{
+    if (!params->b_enable_lidar_bev || lidar_bev_worker_thread_.joinable()) {
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(lidar_bev_worker_mutex_);
+        stop_lidar_bev_worker_ = false;
+        has_pending_lidar_bev_work_ = false;
+    }
+    lidar_bev_worker_thread_ = std::thread(&SensorMap::lidarBevWorkerLoop, this);
+}
+
+void SensorMap::stopLidarBevWorker()
+{
+    {
+        std::lock_guard<std::mutex> lock(lidar_bev_worker_mutex_);
+        stop_lidar_bev_worker_ = true;
+        has_pending_lidar_bev_work_ = false;
+        pending_lidar_bev_work_ = LidarBevWorkItem{};
+    }
+    lidar_bev_worker_cv_.notify_all();
+
+    if (lidar_bev_worker_thread_.joinable()) {
+        lidar_bev_worker_thread_.join();
+    }
+}
+
+void SensorMap::submitLidarBevWork(
+    const std::vector<PointXYZRGBValid>& colored_points,
+    const LidarBevBuilder::OdometryState& pose)
+{
+    if (!params->b_enable_lidar_bev || !lidar_bev_pub_) {
+        return;
+    }
+
+    LidarBevWorkItem work;
+    work.points = colored_points;
+    work.pose = pose;
+    work.valid = true;
+
+    {
+        std::lock_guard<std::mutex> lock(lidar_bev_worker_mutex_);
+        if (stop_lidar_bev_worker_) {
+            return;
+        }
+        pending_lidar_bev_work_ = std::move(work);
+        has_pending_lidar_bev_work_ = true;
+    }
+    lidar_bev_worker_cv_.notify_one();
+}
+
+void SensorMap::lidarBevWorkerLoop()
+{
+    while (ros::ok()) {
+        LidarBevWorkItem work;
+        {
+            std::unique_lock<std::mutex> lock(lidar_bev_worker_mutex_);
+            lidar_bev_worker_cv_.wait(lock, [this]() {
+                return stop_lidar_bev_worker_ || has_pending_lidar_bev_work_;
+            });
+
+            if (stop_lidar_bev_worker_ && !has_pending_lidar_bev_work_) {
+                break;
+            }
+
+            work = std::move(pending_lidar_bev_work_);
+            pending_lidar_bev_work_ = LidarBevWorkItem{};
+            has_pending_lidar_bev_work_ = false;
+            lidar_bev_worker_busy_ = true;
+        }
+
+        if (work.valid) {
+            const auto start_time = std::chrono::high_resolution_clock::now();
+            lidar_bev_builder.build(work.points, &work.pose);
+            lidar_bev_builder.publish(lidar_bev_pub_);
+            const auto end_time = std::chrono::high_resolution_clock::now();
+            const auto duration =
+                std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+            std::cout << "[BEV Thread] lidar_bev time: "
+                      << std::setw(4) << duration.count()
+                      << " ms, points: " << work.points.size() << std::endl;
+        }
+
+        lidar_bev_worker_busy_ = false;
+    }
 }
 
 void SensorMap::get_rostopic_state()
@@ -276,9 +373,9 @@ void SensorMap::body_pose_callback(const self_state::LocalPose &msg)
 {
     auto callback_start_time = std::chrono::high_resolution_clock::now();
 
-    current_time = body_pose.local_time;
     this->last_pose = this->body_pose;
     this->body_pose = msg;
+    current_time = body_pose.local_time;
     // 将角度值转换为弧度制
     body_pose.dr_roll = body_pose.dr_roll * PI / 180.0;
     body_pose.dr_pitch = body_pose.dr_pitch * PI / 180.0;
@@ -289,9 +386,16 @@ void SensorMap::body_pose_callback(const self_state::LocalPose &msg)
             local_pose_stabilizer_.AddRawPose(poseFromLocalPose(body_pose));
     }
     //重新计算速度，（HM速度不准）
-    body_pose.speed_x = (body_pose.dr_x - last_pose.dr_x) * 1000.0 / (body_pose.local_time - last_pose.local_time);
-    body_pose.speed_y = (body_pose.dr_y - last_pose.dr_y) * 1000.0 / (body_pose.local_time - last_pose.local_time);
-    body_pose.speed_z = (body_pose.dr_z - last_pose.dr_z) * 1000.0 / (body_pose.local_time - last_pose.local_time);
+    const double pose_dt_ms = body_pose.local_time - last_pose.local_time;
+    if (pose_dt_ms > 1e-3) {
+        body_pose.speed_x = (body_pose.dr_x - last_pose.dr_x) * 1000.0 / pose_dt_ms;
+        body_pose.speed_y = (body_pose.dr_y - last_pose.dr_y) * 1000.0 / pose_dt_ms;
+        body_pose.speed_z = (body_pose.dr_z - last_pose.dr_z) * 1000.0 / pose_dt_ms;
+    } else {
+        body_pose.speed_x = 0.0;
+        body_pose.speed_y = 0.0;
+        body_pose.speed_z = 0.0;
+    }
     //加入到消息缓存队列，并标记时间和传感器类型
 
     local_pose_msg_mutex.lock();
@@ -545,6 +649,11 @@ void SensorMap::handle_points()
     // 开始计时整个handle_points处理
     auto total_start_time = std::chrono::high_resolution_clock::now();
 
+    if (!local_pose_valid_.load()) {
+        std::cout << "[时间统计] 等待LocalPose，跳过点云处理" << std::endl;
+        return;
+    }
+
     std::vector<pcl::PointXYZ> lidar_points;
     if(choose_car == "LM" || choose_car == "HM") {
         lidar_msg_mutex.lock();
@@ -690,18 +799,27 @@ void SensorMap::handle_points()
         if (should_update_lidar_bev) {
             auto bev_map_start_time = std::chrono::high_resolution_clock::now();
             LidarBevBuilder::OdometryState bev_pose = getCurrentBevPose();
+            LidarBevBuilder::OdometryState accumulation_pose = bev_pose;
+            if (params->lidar_bev_pose_source == "body") {
+                LidarBevBuilder::OdometryState local_warp_pose = getLocalPoseForBev();
+                if (local_warp_pose.valid) {
+                    accumulation_pose = local_warp_pose;
+                }
+            }
             if (params->lidar_bev_pose_source != "body" && !bev_pose.valid) {
                 ROS_WARN_THROTTLE(1.0, "Waiting for %s before publishing LiDAR BEV.",
                                   params->lidar_bev_pose_source.c_str());
             } else {
-                lidar_bev_builder.build(colored_car_points, &bev_pose);
-                lidar_bev_builder.publish(lidar_bev_pub_);
+                submitLidarBevWork(colored_car_points, accumulation_pose);
                 last_lidar_bev_update_time = now;
                 has_last_lidar_bev_update = true;
             }
             auto bev_map_end_time = std::chrono::high_resolution_clock::now();
             auto bev_map_duration = std::chrono::duration_cast<std::chrono::milliseconds>(bev_map_end_time - bev_map_start_time);
-            std::cout << "lidar_bev time: " << std::setw(4) << bev_map_duration.count() << " ms" << std::endl;
+            std::cout << "lidar_bev submit time: " << std::setw(4)
+                      << bev_map_duration.count()
+                      << " ms, worker_busy: " << lidar_bev_worker_busy_.load()
+                      << std::endl;
         }
     }
 
@@ -903,6 +1021,7 @@ void SensorMap::output()
     if (processing_thread.joinable())
         processing_thread.join();
 
+    stopLidarBevWorker();
 
 }
 

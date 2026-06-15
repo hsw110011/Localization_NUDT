@@ -18,7 +18,7 @@ from loc_bev.cinterface import CInterface
 from loc_bev.common_struct import InputData
 from loc_bev.coord_converter import CoordConverter
 from loc_bev.dem_tool import load_dem_tiff, normalize_to_uint8
-from loc_bev.dem_zncc import sample_dem_patch, sample_dem_patch_crop_rotate
+from loc_bev.dem_zncc import sample_dem_patch
 
 
 def _make_dem_color_map(dem_data):
@@ -217,10 +217,10 @@ class PythonLocalizationNode(object):
             self.gridmap_config, "lidar_bev_resolution", 0.2
         )
         default_map_size_x = _config_float(
-            self.gridmap_config, "lidar_bev_map_size_x", 100.0
+            self.gridmap_config, "lidar_bev_map_size_x", 64.0
         )
         default_map_size_y = _config_float(
-            self.gridmap_config, "lidar_bev_map_size_y", 100.0
+            self.gridmap_config, "lidar_bev_map_size_y", 64.0
         )
 
         self.dem_path = rospy.get_param("~dem_path", "/home/hsw/catkin_ws/doc/miluo_dsm.tif")
@@ -245,7 +245,14 @@ class PythonLocalizationNode(object):
         self.heading_source = rospy.get_param("~heading_source", "global_pose")
         self.heading_convention = rospy.get_param("~heading_convention", "auto")
         self.heading_offset_deg = float(rospy.get_param("~heading_offset_deg", 0.0))
-        self.dem_sampling_mode = rospy.get_param("~dem_sampling_mode", "crop_rotate")
+        self.dem_sampling_mode = rospy.get_param("~dem_sampling_mode", "target_grid")
+        if self.dem_sampling_mode.lower() in ("crop_rotate", "crop_then_rotate", "opencv"):
+            rospy.logwarn(
+                "dem_sampling_mode=%s is deprecated; using target_grid sampling to avoid "
+                "rotation borders.",
+                self.dem_sampling_mode,
+            )
+            self.dem_sampling_mode = "target_grid"
         self.dsm_reference_radius_m = float(
             rospy.get_param(
                 "~dsm_reference_radius_m",
@@ -488,18 +495,6 @@ class PythonLocalizationNode(object):
         return "math"
 
     def _sample_dsm_patch(self, center_lon, center_lat, heading, heading_convention):
-        if self.dem_sampling_mode.lower() in ("crop_rotate", "crop_then_rotate", "opencv"):
-            return sample_dem_patch_crop_rotate(
-                self.dem_data,
-                self.coord_converter,
-                center_lon,
-                center_lat,
-                heading,
-                self.patch_height,
-                self.patch_width,
-                terrain_resolution=self.terrain_resolution,
-                heading_convention=heading_convention,
-            )
         return sample_dem_patch(
             self.dem_data,
             self.coord_converter,

@@ -126,18 +126,10 @@ void my_config::readPara()
                 lidar_bev_ground_min_points = std::stoi(value);
             else if (key == "lidar_bev_height_quantile")
                 lidar_bev_height_quantile = std::stod(value);
-            else if (key == "lidar_bev_accumulation_frame_count")
-                lidar_bev_accumulation_frame_count = std::stoi(value);
-            else if (key == "lidar_bev_count_saturation")
-                lidar_bev_count_saturation = std::stoi(value);
-            else if (key == "lidar_bev_distance_decay_alpha")
-                lidar_bev_distance_decay_alpha = std::stod(value);
-            else if (key == "lidar_bev_edge_gradient_threshold")
-                lidar_bev_edge_gradient_threshold = std::stod(value);
-            else if (key == "lidar_bev_edge_min_height")
-                lidar_bev_edge_min_height = std::stod(value);
-            else if (key == "lidar_bev_edge_min_jump")
-                lidar_bev_edge_min_jump = std::stod(value);
+            else if (key == "lidar_bev_cell_max_points")
+                lidar_bev_cell_max_points = std::stoi(value);
+            else if (key == "lidar_bev_debug_window_stride")
+                lidar_bev_debug_window_stride = std::stoi(value);
             else if (key == "lidar_bev_edge_min_valid_neighbors")
                 lidar_bev_edge_min_valid_neighbors = std::stoi(value);
 
