@@ -1,0 +1,104 @@
+# Local editor and OS files
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Local agent/tool state
+.agents/
+.codex/
+.codegraph/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+
+# C/C++ and CMake generated files
+build/
+devel/
+install/
+log/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+CTestConfiguration.ini
+CTestCustom.cmake
+Makefile
+compile_commands.json
+Testing/
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+
+# ROS/catkin generated files
+.catkin
+.catkin_tools/
+.rosinstall
+catkin_generated/
+catkin_make.cache
+atomic_configure/
+gtest/
+test_results/
+
+# Runtime logs and dumps
+*.log
+*.pid
+*.tmp
+*.bak
+*.orig
+core
+core.*
+
+# Project runtime outputs
+output/
+debug/
+dem_loc/output/
+dem_loc/debug/
+GridMap_v7_5_ros1/output/
+GridMap_v7_5_ros1/debug/
+FastLioBodyBev_ros1/output/
+FastLioBodyBev_ros1/debug/
+
+# Generated binaries
+bin/
+*/bin/
+
+# Large local datasets and map artifacts
+*.bag
+*.bag.active
+*.pcd
+*.ply
+*.las
+*.laz
+*.tif
+*.tiff
+*.npy
+*.npz
+
+# Model and experiment artifacts
+*.pt
+*.pth
+*.onnx
+*.engine
+runs/
+wandb/
