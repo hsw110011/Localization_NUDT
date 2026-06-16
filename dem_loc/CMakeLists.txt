@@ -9,8 +9,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 find_package(catkin REQUIRED COMPONENTS
   roscpp
   rospy
+  std_msgs
+  geometry_msgs
   sensor_msgs
   nav_msgs
+  grid_map_msgs
   cv_bridge
   image_transport
   pcl_ros
@@ -42,7 +45,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 # 关键修改：删除了 'INCLUDE_DIRS include'，解决了报错
 # 因为你的头文件在 src/include，且只供本节点内部使用，不需要导出
 catkin_package(
-  CATKIN_DEPENDS roscpp rospy sensor_msgs nav_msgs cv_bridge image_transport pcl_ros pcl_conversions tf2 tf2_ros tf2_geometry_msgs tf2_eigen
+  CATKIN_DEPENDS roscpp rospy std_msgs geometry_msgs sensor_msgs nav_msgs grid_map_msgs cv_bridge image_transport pcl_ros pcl_conversions tf2 tf2_ros tf2_geometry_msgs tf2_eigen
   DEPENDS OpenCV PCL GDAL
 )
 
@@ -87,7 +90,12 @@ message(STATUS "Included Headers from: ${PROJECT_SOURCE_DIR}/src/include")
 
 catkin_install_python(PROGRAMS
   scripts/localization_python.py
+  scripts/lidar_height_pf_localization.py
   scripts/test_cinterface.py
   scripts/visualize_terrain_roughness.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
+install(DIRECTORY config/
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )

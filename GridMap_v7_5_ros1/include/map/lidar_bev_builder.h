@@ -49,7 +49,7 @@ public:
         int ground_min_points = 30;
 
         double height_quantile = 0.90;
-        int cell_max_points = 80;
+        int cell_max_points = 500;
         int debug_window_stride = 2;
         int edge_min_valid_neighbors = 4;
     };

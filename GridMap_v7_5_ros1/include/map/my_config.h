@@ -228,7 +228,7 @@ public:
     double lidar_bev_ground_fallback_quantile = 0.35;
     int lidar_bev_ground_min_points = 30;
     double lidar_bev_height_quantile = 0.90;
-    int lidar_bev_cell_max_points = 80;
+    int lidar_bev_cell_max_points = 500;
     int lidar_bev_debug_window_stride = 2;
     int lidar_bev_edge_min_valid_neighbors = 4;
 
