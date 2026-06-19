@@ -203,7 +203,7 @@ public:
     bool b_enable_lidar_bev = true;
     bool b_lidar_bev_use_odometry = true;
     bool b_lidar_bev_use_ransac_ground = true;
-    bool b_show_lidar_bev_layers = true;
+    bool b_show_lidar_bev_layers = false;
     std::string lidar_bev_pose_source = "localpose"; // localpose, odometry, body
     std::string lidar_bev_topic = "/lidar_bev/grid_map";
     std::string lidar_bev_frame_id = "map";
@@ -231,6 +231,8 @@ public:
     double lidar_bev_ground_failure_fallback_z = 0.0;
     int lidar_bev_ground_min_points = 30;
     double lidar_bev_height_quantile = 0.90;
+    double lidar_bev_h_rel_deadzone_half = 0.5;
+    double lidar_bev_grad_deadzone_half = 0.15;
     int lidar_bev_cell_max_points = 500;
     int lidar_bev_debug_window_stride = 2;
     int lidar_bev_edge_min_valid_neighbors = 4;

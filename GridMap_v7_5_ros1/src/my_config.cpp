@@ -132,6 +132,10 @@ void my_config::readPara()
                 lidar_bev_ground_min_points = std::stoi(value);
             else if (key == "lidar_bev_height_quantile")
                 lidar_bev_height_quantile = std::stod(value);
+            else if (key == "lidar_bev_h_rel_deadzone_half")
+                lidar_bev_h_rel_deadzone_half = std::stod(value);
+            else if (key == "lidar_bev_grad_deadzone_half")
+                lidar_bev_grad_deadzone_half = std::stod(value);
             else if (key == "lidar_bev_cell_max_points")
                 lidar_bev_cell_max_points = std::stoi(value);
             else if (key == "lidar_bev_debug_window_stride")

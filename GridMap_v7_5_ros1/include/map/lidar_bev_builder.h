@@ -22,7 +22,7 @@ public:
         bool enabled = true;
         bool use_odometry_frame = true;
         bool use_ransac_ground = true;
-        bool show_windows = true;
+        bool show_windows = false;
 
         std::string topic = "/lidar_bev/grid_map";
         std::string odometry_frame_id = "map";
@@ -52,6 +52,8 @@ public:
         int ground_min_points = 30;
 
         double height_quantile = 0.90;
+        double h_rel_deadzone_half_width = 0.5;
+        double grad_deadzone_half_width = 0.15;
         int cell_max_points = 500;
         int debug_window_stride = 2;
         int edge_min_valid_neighbors = 4;
@@ -74,6 +76,8 @@ public:
     const grid_map::GridMap& getGridMap() const { return map_; }
     const Config& getConfig() const { return config_; }
     double getCenterRelativeHeight() const;
+    double getMaxAbsLongitudinalGradient() const;
+    double getMaxAbsLateralGradient() const;
     double getGroundReference() const;
     int getGroundRoiCandidateCount() const;
     int getGroundRoiPlanarCount() const;
@@ -156,6 +160,7 @@ private:
                                  double max_value) const;
     cv::Mat renderHeightLayer(const std::string& layer_name) const;
     cv::Mat renderBinaryLayer(const std::string& layer_name, bool draw_center_mark) const;
+    cv::Mat renderMaskLayer() const;
     cv::Vec3b viridisColor(double normalized_value) const;
     std::pair<double, double> getRobustLayerRange(const std::string& layer_name,
                                                   double fallback_min,
@@ -173,5 +178,6 @@ private:
                                  double top_fraction,
                                  int total_count) const;
     double percentile(const std::vector<float>& values, double quantile) const;
+    double getMaxAbsGradientValue(const std::string& layer_name) const;
     bool isFinitePoint(const PointXYZRGBValid& point) const;
 };

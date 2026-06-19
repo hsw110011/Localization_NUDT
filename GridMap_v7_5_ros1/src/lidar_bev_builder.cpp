@@ -40,6 +40,18 @@ std::size_t gridIndex(int row, int col, int cols)
     return static_cast<std::size_t>(row) * static_cast<std::size_t>(cols) +
            static_cast<std::size_t>(col);
 }
+
+float applyScalarDeadzone(float value, double half_width)
+{
+    if (half_width <= 0.0 || !std::isfinite(value)) {
+        return value;
+    }
+    if (value >= -static_cast<float>(half_width) &&
+        value <= static_cast<float>(half_width)) {
+        return 0.0f;
+    }
+    return value;
+}
 }  // namespace
 
 void LidarBevBuilder::configure(const Config& config)
@@ -69,6 +81,8 @@ void LidarBevBuilder::configure(const Config& config)
     config_.debug_window_stride = std::max(1, config_.debug_window_stride);
     config_.edge_min_valid_neighbors =
         std::max(1, std::min(9, config_.edge_min_valid_neighbors));
+    config_.h_rel_deadzone_half_width = std::max(0.0, config_.h_rel_deadzone_half_width);
+    config_.grad_deadzone_half_width = std::max(0.0, config_.grad_deadzone_half_width);
 }
 
 void LidarBevBuilder::initializeMap(const std::string& frame_id, const grid_map::Position& center)
@@ -451,13 +465,14 @@ void LidarBevBuilder::fillMapFromFrameHistory(
                 meanTopHeightFraction(cell.top_heights,
                                       kSurfaceTopHeightFraction,
                                       cell.count));
-        const float h_rel =
+        const float h_rel_raw =
             static_cast<float>(static_cast<double>(h_q) - ground_reference);
-        if (!std::isfinite(h_rel)) {
+        if (!std::isfinite(h_rel_raw)) {
             continue;
         }
 
-        h_rel_layer(row, col) = h_rel;
+        h_rel_layer(row, col) =
+            applyScalarDeadzone(h_rel_raw, config_.h_rel_deadzone_half_width);
         mask_layer(row, col) = 1.0f;
     }
 }
@@ -614,6 +629,10 @@ void LidarBevBuilder::computeDirectionalGradients()
         const int row = static_cast<int>(index / static_cast<std::size_t>(cols));
         const int col = static_cast<int>(index % static_cast<std::size_t>(cols));
         const float center_height = smoothed_height_[index];
+        if (!std::isfinite(center_height)) {
+            continue;
+        }
+
         int valid_neighbor_count = 0;
         double grad_index1 = 0.0;
         double grad_index0 = 0.0;
@@ -622,22 +641,31 @@ void LidarBevBuilder::computeDirectionalGradients()
             for (int dc = -1; dc <= 1; ++dc) {
                 const int neighbor_row = row + dr;
                 const int neighbor_col = col + dc;
-                float value = center_height;
+                if (neighbor_row < 0 || neighbor_row >= rows ||
+                    neighbor_col < 0 || neighbor_col >= cols) {
+                    continue;
+                }
 
-                if (neighbor_row >= 0 && neighbor_row < rows &&
-                    neighbor_col >= 0 && neighbor_col < cols) {
-                    const std::size_t neighbor_index =
-                        gridIndex(neighbor_row, neighbor_col, cols);
-                    if (smoothed_valid_[neighbor_index]) {
-                        value = smoothed_height_[neighbor_index];
+                const std::size_t neighbor_index =
+                    gridIndex(neighbor_row, neighbor_col, cols);
+                float value = center_height;
+                if (smoothed_valid_[neighbor_index]) {
+                    const float neighbor_value = smoothed_height_[neighbor_index];
+                    if (!std::isfinite(neighbor_value)) {
+                        continue;
+                    }
+                    value = neighbor_value;
+                    if (dr != 0 || dc != 0) {
                         ++valid_neighbor_count;
                     }
                 }
 
-                grad_index1 += static_cast<double>(sobel_x[dr + 1][dc + 1]) *
-                               static_cast<double>(value);
-                grad_index0 += static_cast<double>(sobel_y[dr + 1][dc + 1]) *
-                               static_cast<double>(value);
+                const double sobel_weight_y =
+                    static_cast<double>(sobel_y[dr + 1][dc + 1]);
+                const double sobel_weight_x =
+                    static_cast<double>(sobel_x[dr + 1][dc + 1]);
+                grad_index0 += sobel_weight_y * static_cast<double>(value);
+                grad_index1 += sobel_weight_x * static_cast<double>(value);
             }
         }
 
@@ -645,6 +673,8 @@ void LidarBevBuilder::computeDirectionalGradients()
             continue;
         }
 
+        // Center-fill Sobel: invalid neighbors use center smoothed height;
+        // keep standard Sobel scale (/8) to avoid boundary blow-up.
         const double index0_gradient =
             grad_index0 / (8.0 * config_.resolution);
         const double index1_gradient =
@@ -652,13 +682,20 @@ void LidarBevBuilder::computeDirectionalGradients()
         const Eigen::Vector2d map_gradient =
             index0_gradient * index0_unit + index1_gradient * index1_unit;
 
-        const float longitudinal_gradient =
-            static_cast<float>(map_gradient.dot(longitudinal_unit));
-        const float lateral_gradient =
-            static_cast<float>(map_gradient.dot(lateral_unit));
+        const float longitudinal_gradient = applyScalarDeadzone(
+            static_cast<float>(map_gradient.dot(longitudinal_unit)),
+            config_.grad_deadzone_half_width);
+        const float lateral_gradient = applyScalarDeadzone(
+            static_cast<float>(map_gradient.dot(lateral_unit)),
+            config_.grad_deadzone_half_width);
+        constexpr float kGradCap = 3.0f;
 
-        longitudinal_gradient_layer(row, col) = longitudinal_gradient;
-        lateral_gradient_layer(row, col) = lateral_gradient;
+        longitudinal_gradient_layer(row, col) = std::max(
+            -kGradCap,
+            std::min(kGradCap, longitudinal_gradient));
+        lateral_gradient_layer(row, col) = std::max(
+            -kGradCap,
+            std::min(kGradCap, lateral_gradient));
     }
 }
 
@@ -675,20 +712,16 @@ void LidarBevBuilder::showDebugWindows() const
         return;
     }
 
-    static const std::string layers_window_name = "BEV H_rel | BEV G_long | BEV G_lat";
-    static const std::string mask_window_name = "BEV M_L";
+    static const std::string layers_window_name = "BEV H_rel | G_long | G_lat | M_L";
     static bool windows_created = false;
     if (!windows_created) {
         int flags = cv::WINDOW_NORMAL | cv::WINDOW_KEEPRATIO;
         cv::namedWindow(layers_window_name, flags);
-        cv::namedWindow(mask_window_name, flags);
-        cv::resizeWindow(layers_window_name, 1500, 500);
-        cv::resizeWindow(mask_window_name, 500, 500);
+        cv::resizeWindow(layers_window_name, 2000, 500);
         windows_created = true;
     }
 
     cv::imshow(layers_window_name, renderStackedDebugLayers());
-    cv::imshow(mask_window_name, renderBinaryLayer("M_L", false));
     cv::waitKey(1);
 }
 
@@ -707,19 +740,32 @@ cv::Mat LidarBevBuilder::renderStackedDebugLayers() const
         renderColorizedLayer("G_long_L", longitudinal_range.first, longitudinal_range.second);
     cv::Mat lateral_image =
         renderColorizedLayer("G_lat_L", lateral_range.first, lateral_range.second);
+    cv::Mat mask_image = renderMaskLayer();
 
     if (!height_image.empty()) {
         drawGroundReferenceRegion(height_image);
     }
+    if (!height_image.empty()) {
+        drawCenterMark(height_image);
+    }
+    if (!longitudinal_image.empty()) {
+        drawCenterMark(longitudinal_image);
+    }
+    if (!lateral_image.empty()) {
+        drawCenterMark(lateral_image);
+    }
 
     cv::Mat combined;
     if (height_image.empty() || longitudinal_image.empty() || lateral_image.empty() ||
+        mask_image.empty() ||
         height_image.rows != longitudinal_image.rows ||
-        height_image.rows != lateral_image.rows) {
+        height_image.rows != lateral_image.rows ||
+        height_image.rows != mask_image.rows) {
         return height_image;
     }
     cv::hconcat(height_image, longitudinal_image, combined);
     cv::hconcat(combined, lateral_image, combined);
+    cv::hconcat(combined, mask_image, combined);
     return combined;
 }
 
@@ -790,6 +836,29 @@ cv::Mat LidarBevBuilder::renderBinaryLayer(const std::string& layer_name,
         drawCenterMark(image);
     }
     drawGroundReferenceRegion(image);
+    return image;
+}
+
+cv::Mat LidarBevBuilder::renderMaskLayer() const
+{
+    const int rows = map_rows_;
+    const int cols = map_cols_;
+    cv::Mat image(rows, cols, CV_8UC3, cv::Scalar(0, 0, 0));
+
+    if (!map_.exists("M_L")) {
+        return image;
+    }
+
+    const auto& layer = map_["M_L"];
+    for (const std::size_t linear_index : active_cell_indices_) {
+        const int row = static_cast<int>(linear_index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(linear_index % static_cast<std::size_t>(cols));
+        if (layer(row, col) > 0.5f) {
+            image.at<cv::Vec3b>(row, col) = cv::Vec3b(255, 255, 255);
+        }
+    }
+
+    drawCenterMark(image);
     return image;
 }
 
@@ -1031,17 +1100,13 @@ void LidarBevBuilder::drawCenterMark(cv::Mat& image) const
     vehicleBodyToImagePixel(0.0, 0.0, origin_row, origin_col);
     const int center_col = static_cast<int>(std::round(origin_col));
     const int center_row = static_cast<int>(std::round(origin_row));
-    const int marker = std::max(4, static_cast<int>(1.0 / config_.resolution));
-    cv::line(image,
-             cv::Point(center_col - marker, center_row),
-             cv::Point(center_col + marker, center_row),
-             cv::Scalar(255, 255, 255),
-             1);
-    cv::line(image,
-             cv::Point(center_col, center_row - marker),
-             cv::Point(center_col, center_row + marker),
-             cv::Scalar(255, 255, 255),
-             1);
+    const int radius = std::max(3, static_cast<int>(std::round(0.5 / config_.resolution)));
+    cv::circle(image,
+               cv::Point(center_col, center_row),
+               radius,
+               cv::Scalar(0, 0, 255),
+               -1,
+               cv::LINE_AA);
 }
 
 bool LidarBevBuilder::isGroundRoiPlanarPoint(double x, double y) const
@@ -1273,6 +1338,47 @@ double LidarBevBuilder::getCenterRelativeHeight() const
     const float value = h_rel(center_index(0), center_index(1));
     return std::isfinite(value) ? static_cast<double>(value)
                                 : std::numeric_limits<double>::quiet_NaN();
+}
+
+double LidarBevBuilder::getMaxAbsGradientValue(const std::string& layer_name) const
+{
+    if (!map_.exists(layer_name) || !map_.exists("M_L")) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const auto& layer = map_[layer_name];
+    const auto& mask = map_["M_L"];
+    const int cols = map_cols_;
+    double max_abs = 0.0;
+    bool found = false;
+
+    for (const std::size_t linear_index : active_cell_indices_) {
+        const int row = static_cast<int>(linear_index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(linear_index % static_cast<std::size_t>(cols));
+        if (mask(row, col) <= 0.5f) {
+            continue;
+        }
+
+        const float value = layer(row, col);
+        if (!std::isfinite(value)) {
+            continue;
+        }
+
+        max_abs = std::max(max_abs, std::abs(static_cast<double>(value)));
+        found = true;
+    }
+
+    return found ? max_abs : std::numeric_limits<double>::quiet_NaN();
+}
+
+double LidarBevBuilder::getMaxAbsLongitudinalGradient() const
+{
+    return getMaxAbsGradientValue("G_long_L");
+}
+
+double LidarBevBuilder::getMaxAbsLateralGradient() const
+{
+    return getMaxAbsGradientValue("G_lat_L");
 }
 
 void LidarBevBuilder::publish(const ros::Publisher& publisher) const

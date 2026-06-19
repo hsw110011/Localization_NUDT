@@ -106,6 +106,8 @@ void SensorMap::Init()
     bev_config.ground_failure_fallback_z = params->lidar_bev_ground_failure_fallback_z;
     bev_config.ground_min_points = params->lidar_bev_ground_min_points;
     bev_config.height_quantile = params->lidar_bev_height_quantile;
+    bev_config.h_rel_deadzone_half_width = params->lidar_bev_h_rel_deadzone_half;
+    bev_config.grad_deadzone_half_width = params->lidar_bev_grad_deadzone_half;
     bev_config.cell_max_points = params->lidar_bev_cell_max_points;
     bev_config.debug_window_stride = params->lidar_bev_debug_window_stride;
     bev_config.edge_min_valid_neighbors = params->lidar_bev_edge_min_valid_neighbors;
@@ -330,6 +332,8 @@ void SensorMap::lidarBevWorkerLoop()
             const int roi_pts = lidar_bev_builder.getGroundRoiCandidateCount();
             const int planar_pts = lidar_bev_builder.getGroundRoiPlanarCount();
             const double center_h_rel = lidar_bev_builder.getCenterRelativeHeight();
+            const double max_g_long = lidar_bev_builder.getMaxAbsLongitudinalGradient();
+            const double max_g_lat = lidar_bev_builder.getMaxAbsLateralGradient();
             std::cout << "[BEV] ground_roi_pts: " << roi_pts << "/" << params->lidar_bev_ground_min_points
                       << " (planar " << planar_pts << ") ground_ref: ";
             if (std::isfinite(ground_ref)) {
@@ -340,6 +344,18 @@ void SensorMap::lidarBevWorkerLoop()
             std::cout << " center H_rel_surf: ";
             if (std::isfinite(center_h_rel)) {
                 std::cout << std::fixed << std::setprecision(3) << center_h_rel << " m";
+            } else {
+                std::cout << "N/A";
+            }
+            std::cout << " max|G_long_L|: ";
+            if (std::isfinite(max_g_long)) {
+                std::cout << std::fixed << std::setprecision(4) << max_g_long;
+            } else {
+                std::cout << "N/A";
+            }
+            std::cout << " max|G_lat_L|: ";
+            if (std::isfinite(max_g_lat)) {
+                std::cout << std::fixed << std::setprecision(4) << max_g_lat;
             } else {
                 std::cout << "N/A";
             }

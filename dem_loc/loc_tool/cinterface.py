@@ -13,10 +13,12 @@
 GridMap LiDAR BEV 话题（GridMap_v7_5_ros1 发布）:
     /lidar_bev/grid_map  — grid_map_msgs/GridMap
     图层: H_rel_surf, M_L, G_long_L, G_lat_L
+    parse_lidar_bev_grid_map(msg)  — 解析为 H_L / Gx_L / Gy_L / M_obs numpy 数组
 """
 
 import threading
 
+import numpy as np
 import rospy
 from behavior.msg import ReferencePath as ReferencePathMsg
 from grid_map_msgs.msg import GridMap as GridMapMsg
@@ -33,6 +35,53 @@ from world_state.msg import SimilarityMap as SimilarityMapMsg
 from world_state.msg import TerrainMap as TerrainMapMsg
 
 from .common_struct import INPUT_DATA_FIELDS, INPUT_REFRESH_FIELDS, InputData
+
+
+BEV_LAYER_H_REL = "H_rel_surf"
+BEV_LAYER_M_OBS = "M_L"
+BEV_LAYER_G_LONG = "G_long_L"
+BEV_LAYER_G_LAT = "G_lat_L"
+
+
+def extract_grid_map_layer(msg, layer_name):
+    """从 grid_map_msgs/GridMap 提取单层为 (rows, cols) float32 numpy 数组。"""
+    if layer_name not in msg.layers:
+        raise KeyError("layer '{}' not in GridMap (have {})".format(layer_name, msg.layers))
+
+    index = msg.layers.index(layer_name)
+    array = msg.data[index]
+    if len(array.layout.dim) < 2:
+        raise ValueError("invalid GridMap layer layout for '{}'".format(layer_name))
+
+    rows = int(array.layout.dim[0].size)
+    cols = int(array.layout.dim[1].size)
+    data = np.asarray(array.data, dtype=np.float32)
+    if data.size != rows * cols:
+        raise ValueError(
+            "layer '{}' size mismatch: data={} expected {}".format(
+                layer_name, data.size, rows * cols
+            )
+        )
+    # grid_map / Eigen 列优先存储
+    return data.reshape(cols, rows).T.copy()
+
+
+def parse_lidar_bev_grid_map(msg):
+    """解析 /lidar_bev/grid_map，返回设计文档命名 H_L, Gx_L, Gy_L, M_obs。"""
+    h_l = extract_grid_map_layer(msg, BEV_LAYER_H_REL)
+    m_obs = extract_grid_map_layer(msg, BEV_LAYER_M_OBS)
+    gy_l = extract_grid_map_layer(msg, BEV_LAYER_G_LONG)
+    gx_l = extract_grid_map_layer(msg, BEV_LAYER_G_LAT)
+    return {
+        "H_L": h_l,
+        "Gx_L": gx_l,
+        "Gy_L": gy_l,
+        "M_obs": m_obs,
+        "H_rel_surf": h_l,
+        "G_long_L": gy_l,
+        "G_lat_L": gx_l,
+        "M_L": m_obs,
+    }
 
 
 TOPIC_DEFINITIONS = (

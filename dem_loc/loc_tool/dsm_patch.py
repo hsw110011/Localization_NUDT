@@ -2,8 +2,8 @@
 """以 Odom 位置为中心、车头朝上，用 PyTorch grid_sample 裁剪局部 DSM patch。
 
 BEV 对齐:
-    H_rel_surf = 高程 - 中心点高程
-    G_long_L / G_lat_L = 3x3 中值 + Sobel / (8*res)，车体纵/横向投影
+    H_rel_surf = 高程 - 中心点高程，再经 [-h_half, +h_half] 死区
+    G_long_L / G_lat_L = 3x3 中值 + Sobel / (8*res)，再经 |g|<=g_half 死区
     显示: H_rel | G_long | G_lat 三列 (各 320×320)，viridis，无 M_L 掩码
     后处理在 GPU 上用 unfold/conv2d，避免 Python 逐像素循环。
 """
@@ -73,25 +73,49 @@ def _median_filter_3x3_torch(layer_2d):
     return patches.reshape(1, 1, h, w, 9).median(dim=-1).values.squeeze(0).squeeze(0)
 
 
-def _compute_bev_layers_torch(patch_2d, resolution, sobel_x, sobel_y):
+def _apply_deadzone_torch(values, half_width):
+    if half_width <= 0.0:
+        return values
+    out = values.clone()
+    out[out.abs() <= float(half_width)] = 0.0
+    return out
+
+
+def _compute_bev_layers_torch(
+    patch_2d,
+    resolution,
+    sobel_x,
+    sobel_y,
+    h_rel_deadzone_half=0.20,
+    grad_deadzone_half=0.15,
+):
     """patch_2d: [H,W] float tensor on any device."""
     rows, cols = patch_2d.shape
     center = patch_2d[rows // 2, cols // 2]
     if not torch.isfinite(center):
         center = torch.nanmedian(patch_2d)
-    h_rel = patch_2d - center
+    h_rel = _apply_deadzone_torch(patch_2d - center, h_rel_deadzone_half)
 
     smoothed = _median_filter_3x3_torch(h_rel)
     s = smoothed.unsqueeze(0).unsqueeze(0)
     grad_index0 = F.conv2d(s, sobel_y, padding=1).squeeze()
     grad_index1 = F.conv2d(s, sobel_x, padding=1).squeeze()
     scale = 8.0 * max(float(resolution), 1e-3)
-    g_long = -grad_index0 / scale
-    g_lat = -grad_index1 / scale
+    g_long = _apply_deadzone_torch(-grad_index0 / scale, grad_deadzone_half)
+    g_lat = _apply_deadzone_torch(-grad_index1 / scale, grad_deadzone_half)
+    grad_cap = 3.0
+    g_long = torch.clamp(g_long, -grad_cap, grad_cap)
+    g_lat = torch.clamp(g_lat, -grad_cap, grad_cap)
     return h_rel, g_long, g_lat, center
 
 
-def compute_bev_layers(elevation_patch, resolution=0.2, device=None):
+def compute_bev_layers(
+    elevation_patch,
+    resolution=0.2,
+    device=None,
+    h_rel_deadzone_half=0.20,
+    grad_deadzone_half=0.15,
+):
     """Numpy wrapper (fast torch backend)."""
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -100,7 +124,12 @@ def compute_bev_layers(elevation_patch, resolution=0.2, device=None):
     sobel_x = _SOBEL_X.to(device)
     sobel_y = _SOBEL_Y.to(device)
     h_rel, g_long, g_lat, center = _compute_bev_layers_torch(
-        patch, resolution, sobel_x, sobel_y
+        patch,
+        resolution,
+        sobel_x,
+        sobel_y,
+        h_rel_deadzone_half=h_rel_deadzone_half,
+        grad_deadzone_half=grad_deadzone_half,
     )
     return {
         "H_rel_surf": h_rel.detach().cpu().numpy().astype(np.float32),
@@ -108,6 +137,41 @@ def compute_bev_layers(elevation_patch, resolution=0.2, device=None):
         "G_lat_L": g_lat.detach().cpu().numpy().astype(np.float32),
         "center_height": float(center.detach().cpu().item()),
     }
+
+
+def draw_center_dot(image, radius=4):
+    """在图层中心画红点（patch/BEV 几何中心）。"""
+    if cv2 is None:
+        return np.asarray(image, dtype=np.uint8)
+
+    img = np.asarray(image, dtype=np.uint8)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    else:
+        img = img.copy()
+    h, w = img.shape[:2]
+    cv2.circle(img, (w // 2, h // 2), int(radius), (0, 0, 255), -1, cv2.LINE_AA)
+    return img
+
+
+def render_mask_layer(mask):
+    """M_L / M_obs 二值图：白=有效，黑=无效。"""
+    m = np.asarray(mask, dtype=np.float32)
+    img = np.zeros((m.shape[0], m.shape[1], 3), dtype=np.uint8)
+    valid = np.isfinite(m) & (m > 0.5)
+    img[valid] = (255, 255, 255)
+    return img
+
+
+def render_masked_colorized_layer(layer, mask, min_value, max_value):
+    """仅在 mask 有效区域上色，其余为黑。"""
+    layer = np.asarray(layer, dtype=np.float32)
+    mask = np.asarray(mask, dtype=bool)
+    colored = render_colorized_layer(layer, min_value, max_value)
+    out = np.zeros_like(colored)
+    valid = mask & np.isfinite(layer)
+    out[valid] = colored[valid]
+    return out
 
 
 def render_colorized_layer(layer, min_value, max_value):
@@ -138,7 +202,7 @@ def render_bev_layers_stack(layers, fallback_ranges=None):
             fallback_min=fallback_ranges[name][0],
             fallback_max=fallback_ranges[name][1],
         )
-        images.append(render_colorized_layer(layer, vmin, vmax))
+        images.append(draw_center_dot(render_colorized_layer(layer, vmin, vmax)))
 
     if cv2 is None:
         return np.concatenate(images, axis=1)
@@ -161,6 +225,8 @@ class DsmPatchCropper(object):
         device=None,
         fill_value=0.0,
         edge_min_valid_neighbors=5,
+        h_rel_deadzone_half=0.20,
+        grad_deadzone_half=0.15,
     ):
         self.dem_data = dem_data
         self.cc = coord_converter
@@ -169,6 +235,8 @@ class DsmPatchCropper(object):
         self.resolution = float(resolution)
         self.fill_value = float(fill_value)
         self.edge_min_valid_neighbors = int(edge_min_valid_neighbors)
+        self.h_rel_deadzone_half = float(h_rel_deadzone_half)
+        self.grad_deadzone_half = float(grad_deadzone_half)
 
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -272,7 +340,12 @@ class DsmPatchCropper(object):
         patch_2d = result["patch"].squeeze(0).squeeze(0)
 
         h_rel, g_long, g_lat, center = _compute_bev_layers_torch(
-            patch_2d, self.resolution, self._sobel_x, self._sobel_y
+            patch_2d,
+            self.resolution,
+            self._sobel_x,
+            self._sobel_y,
+            h_rel_deadzone_half=self.h_rel_deadzone_half,
+            grad_deadzone_half=self.grad_deadzone_half,
         )
 
         layers = {
@@ -296,6 +369,10 @@ class DsmPatchCropper(object):
 
     def patch_to_vis_bgr(self, patch):
         layers = compute_bev_layers(
-            patch, resolution=self.resolution, device=self.device
+            patch,
+            resolution=self.resolution,
+            device=self.device,
+            h_rel_deadzone_half=self.h_rel_deadzone_half,
+            grad_deadzone_half=self.grad_deadzone_half,
         )
         return self.layers_to_vis_bgr(layers)
