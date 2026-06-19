@@ -101,6 +101,9 @@ void SensorMap::Init()
     bev_config.ground_ransac_distance = params->lidar_bev_ground_ransac_distance;
     bev_config.ground_max_plane_tilt_deg = params->lidar_bev_ground_max_plane_tilt_deg;
     bev_config.ground_fallback_quantile = params->lidar_bev_ground_fallback_quantile;
+    bev_config.ground_front_half_angle_deg = params->lidar_bev_ground_front_half_angle_deg;
+    bev_config.ground_require_forward = params->b_lidar_bev_ground_require_forward;
+    bev_config.ground_failure_fallback_z = params->lidar_bev_ground_failure_fallback_z;
     bev_config.ground_min_points = params->lidar_bev_ground_min_points;
     bev_config.height_quantile = params->lidar_bev_height_quantile;
     bev_config.cell_max_points = params->lidar_bev_cell_max_points;
@@ -320,15 +323,27 @@ void SensorMap::lidarBevWorkerLoop()
         }
 
         if (work.valid) {
-            const auto start_time = std::chrono::high_resolution_clock::now();
             lidar_bev_builder.build(work.points, &work.pose);
             lidar_bev_builder.publish(lidar_bev_pub_);
-            const auto end_time = std::chrono::high_resolution_clock::now();
-            const auto duration =
-                std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-            std::cout << "[BEV Thread] lidar_bev time: "
-                      << std::setw(4) << duration.count()
-                      << " ms, points: " << work.points.size() << std::endl;
+
+            const double ground_ref = lidar_bev_builder.getGroundReference();
+            const int roi_pts = lidar_bev_builder.getGroundRoiCandidateCount();
+            const int planar_pts = lidar_bev_builder.getGroundRoiPlanarCount();
+            const double center_h_rel = lidar_bev_builder.getCenterRelativeHeight();
+            std::cout << "[BEV] ground_roi_pts: " << roi_pts << "/" << params->lidar_bev_ground_min_points
+                      << " (planar " << planar_pts << ") ground_ref: ";
+            if (std::isfinite(ground_ref)) {
+                std::cout << std::fixed << std::setprecision(3) << ground_ref << " m";
+            } else {
+                std::cout << "N/A";
+            }
+            std::cout << " center H_rel_surf: ";
+            if (std::isfinite(center_h_rel)) {
+                std::cout << std::fixed << std::setprecision(3) << center_h_rel << " m";
+            } else {
+                std::cout << "N/A";
+            }
+            std::cout << std::endl;
         }
 
         lidar_bev_worker_busy_ = false;
@@ -371,8 +386,6 @@ void SensorMap::get_rostopic_state()
 
 void SensorMap::body_pose_callback(const self_state::LocalPose &msg)
 {
-    auto callback_start_time = std::chrono::high_resolution_clock::now();
-
     this->last_pose = this->body_pose;
     this->body_pose = msg;
     current_time = body_pose.local_time;
@@ -402,13 +415,6 @@ void SensorMap::body_pose_callback(const self_state::LocalPose &msg)
     local_pose_msg.addData(body_pose, current_time, 1);
     local_pose_msg_mutex.unlock();
     local_pose_valid_.store(true);
-
-
-    auto callback_end_time = std::chrono::high_resolution_clock::now();
-    auto callback_duration = std::chrono::duration_cast<std::chrono::milliseconds>(callback_end_time - callback_start_time);
-    if(callback_duration.count() > 0) {
-        std::cout << "[回调] body_pose_callback: " << callback_duration.count() << "ms" << std::endl;
-    }
 }
 
 void SensorMap::lidar_localpose_callback(const self_state::LidarLocalPose &msg)
@@ -432,8 +438,6 @@ void SensorMap::lidar_localpose_callback(const self_state::LidarLocalPose &msg)
 
 void SensorMap::imu_callback(const sensor_msgs::Imu &msg)
 {
-    auto callback_start_time = std::chrono::high_resolution_clock::now();
-
     // 创建IMU数据 - 使用消息时间戳（更准确的时间同步）
     double timestamp = msg.header.stamp.toSec();
     IMUData imu_data(timestamp, msg);
@@ -446,13 +450,6 @@ void SensorMap::imu_callback(const sensor_msgs::Imu &msg)
     while (!imu_data_queue.empty() &&
            (timestamp - imu_data_queue.front().timestamp) > time_window) {
         imu_data_queue.pop_front();
-    }
-
-    auto callback_end_time = std::chrono::high_resolution_clock::now();
-    auto callback_duration = std::chrono::duration_cast<std::chrono::milliseconds>(callback_end_time - callback_start_time);
-    if(callback_duration.count() > 0) {
-        std::cout << "[回调] imu_callback: " << callback_duration.count() << "ms, 队列大小: "
-                  << imu_data_queue.size() << std::endl;
     }
 }
 
@@ -546,30 +543,20 @@ void SensorMap::BP_lidarCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
 
 void SensorMap::lidarCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
 {
-    auto callback_start_time = std::chrono::high_resolution_clock::now();
-
     pcl::PointCloud<pcl::PointXYZ> pcl_cloud;
     pcl::fromROSMsg(*msg, pcl_cloud);
 
     if(true)
     {
         //体素化
-        auto start_time = std::chrono::high_resolution_clock::now();
         pcl::VoxelGrid<pcl::PointXYZ> voxel_filter;
         voxel_filter.setInputCloud(pcl_cloud.makeShared());
 
         float leaf_size = 0.2f;
         voxel_filter.setLeafSize(leaf_size, leaf_size, leaf_size); // 设置体素大小
         voxel_filter.filter(pcl_cloud); // 进行体素化处理
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        // std::cout << "[回调] voxel_filter duration: " << duration.count() << " ms" << std::endl;
-
 
         // ROI滤波 - 移除车体附近的点云
-        auto roi_start_time = std::chrono::high_resolution_clock::now();
-
-        // ROI参数定义（车体坐标系）
         const float RONI_min_x = -2.0f;   // 车体后方2米
         const float RONI_max_x = 2.0f;    // 车体前方2米
         const float RONI_min_y = -4.0f;   // 车体右侧4米
@@ -601,11 +588,6 @@ void SensorMap::lidarCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
         pcl_cloud.width = pcl_cloud.points.size();
         pcl_cloud.height = 1;
         pcl_cloud.is_dense = false;
-
-        auto roi_end_time = std::chrono::high_resolution_clock::now();
-        auto roi_duration = std::chrono::duration_cast<std::chrono::milliseconds>(roi_end_time - roi_start_time);
-        // std::cout << "[回调] ROI filter duration: " << roi_duration.count() << " ms, removed "
-        //           << removed_points << " points" << std::endl;
     }
 
     // 将点云转换为std::vector
@@ -613,20 +595,13 @@ void SensorMap::lidarCallback(const sensor_msgs::PointCloud2ConstPtr &msg)
  
     lidar_msg_mutex.lock();
     lidar_msg.addData(lidar_points, current_time, 2);  //2代表lidar
-    lidar_msg_mutex.unlock(); 
-
-    auto callback_end_time = std::chrono::high_resolution_clock::now();
-    auto callback_total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(callback_end_time - callback_start_time);
-    std::cout << "[回调] LiDAR总时间: " << callback_total_duration.count() << "ms" << std::endl;
-
+    lidar_msg_mutex.unlock();
 }
 
 
 
 void SensorMap::camera_Front_callback(const sensor_msgs::CompressedImageConstPtr &msg)
 {
-    auto callback_start_time = std::chrono::high_resolution_clock::now();
-
     // 图像解压缩
     cv::Mat img = cv::imdecode(cv::Mat(msg->data), cv::IMREAD_COLOR);
 
@@ -646,11 +621,7 @@ void SensorMap::camera_Front_callback(const sensor_msgs::CompressedImageConstPtr
 
 void SensorMap::handle_points()
 {
-    // 开始计时整个handle_points处理
-    auto total_start_time = std::chrono::high_resolution_clock::now();
-
     if (!local_pose_valid_.load()) {
-        std::cout << "[时间统计] 等待LocalPose，跳过点云处理" << std::endl;
         return;
     }
 
@@ -741,7 +712,6 @@ void SensorMap::handle_points()
 
 
     if(lidar_points.empty()) {
-        std::cout << "[时间统计] 无点云数据，跳过处理" << std::endl;
         return;
     }
 
@@ -797,7 +767,6 @@ void SensorMap::handle_points()
                 min_update_interval_sec;
 
         if (should_update_lidar_bev) {
-            auto bev_map_start_time = std::chrono::high_resolution_clock::now();
             LidarBevBuilder::OdometryState bev_pose = getCurrentBevPose();
             LidarBevBuilder::OdometryState accumulation_pose = bev_pose;
             if (params->lidar_bev_pose_source == "body") {
@@ -814,12 +783,6 @@ void SensorMap::handle_points()
                 last_lidar_bev_update_time = now;
                 has_last_lidar_bev_update = true;
             }
-            auto bev_map_end_time = std::chrono::high_resolution_clock::now();
-            auto bev_map_duration = std::chrono::duration_cast<std::chrono::milliseconds>(bev_map_end_time - bev_map_start_time);
-            std::cout << "lidar_bev submit time: " << std::setw(4)
-                      << bev_map_duration.count()
-                      << " ms, worker_busy: " << lidar_bev_worker_busy_.load()
-                      << std::endl;
         }
     }
 
@@ -874,7 +837,6 @@ void SensorMap::handle_points()
     frozen_theta_ = body_pose.dr_heading;  // body_pose.dr_heading已经在body_pose_callback中转换为弧度
 
     // 6. 发布ROS话题（条件优化）
-    auto publish_start_time = std::chrono::high_resolution_clock::now();
     auto local_pose = getCurrentLocalPose(); // geometry_msgs::msg::Pose2D
 
     // 优化：检查是否有订阅者，避免无用的计算
@@ -882,15 +844,6 @@ void SensorMap::handle_points()
     // ColorMap发布暂时关闭。
     // grid_map_handler_v2.publishColorMap(color_map_pub_, local_pose);
     grid_map_handler_v2.publishObstacleMap(obstacle_pub_, grid_map_handler_v2.near_obstacles_, grid_map_handler_v2.far_obstacles_, local_pose);
-
-
-    
-    auto publish_end_time = std::chrono::high_resolution_clock::now();
-    auto publish_duration = std::chrono::duration_cast<std::chrono::milliseconds>(publish_end_time - publish_start_time);
-    // 计算总处理时间
-    std::cout << "publish time:   " << std::setw(4) << publish_duration.count() << " ms" << std::endl;
-    auto total_end_time = std::chrono::high_resolution_clock::now();
-    auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(total_end_time - total_start_time);
 
 
 
@@ -985,36 +938,18 @@ void SensorMap::output()
     std::thread processing_thread([this]() {
         ros::Rate rate(10);  // 子线程执行频率
         while (ros::ok()&& !stop_flag) {
-
-            auto handle_start_time = std::chrono::high_resolution_clock::now();
-
             handle_points();     // 顺序执行
             // 图像和雷达投影显示暂时关闭。
             // Draw_img_map();
-
-            auto handle_end_time = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                handle_end_time - handle_start_time);
-            std::cout << "[Thread] 处理线程耗时: " << duration.count() << " ms" << std::endl;
             rate.sleep();
         }
     });
 
-    // === 主线程继续spinOnce与打印时间 ===
+    // === 主线程继续spinOnce ===
     while (ros::ok())
     {
-
-        auto loop_start_time = std::chrono::high_resolution_clock::now();
-
         ros::spinOnce();  // 主线程处理ROS回调
-
-        auto loop_end_time = std::chrono::high_resolution_clock::now();
-        auto loop_duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                 loop_end_time - loop_start_time);
-        std::cout << "[Main] spinOnce耗时: " << loop_duration.count() << " ms" << std::endl;
-
         loop_rate.sleep();
-
     }
     stop_flag = true;
     // === 程序退出前等待线程结束 ===

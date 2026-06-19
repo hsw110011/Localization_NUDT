@@ -97,14 +97,14 @@ void GridMapHandler_v4::gridmap_process(const std::vector<PointXYZRGBValid>& col
     updateMapPosition(body_pose);
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
-    std::cout << "updateMapPosition duration: " << duration1.count() << " ms" << std::endl;
+    //     std::cout << "updateMapPosition duration: " << duration1.count() << " ms" << std::endl;
 
     // 步骤2：批量处理点云数据
     auto start_time2 = std::chrono::high_resolution_clock::now();
     processPointCloud(colored_car_points, body_pose);
     auto end_time2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time2 - start_time2);
-    std::cout << "processPointCloud duration: " << duration2.count() << " ms" << std::endl;
+    //     std::cout << "processPointCloud duration: " << duration2.count() << " ms" << std::endl;
 
     // 步骤3：寻找地面基准（3x3邻域）
     auto start_time3 = std::chrono::high_resolution_clock::now();
@@ -112,21 +112,21 @@ void GridMapHandler_v4::gridmap_process(const std::vector<PointXYZRGBValid>& col
     // find_ground_v2();
     auto end_time3 = std::chrono::high_resolution_clock::now();
     auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time3 - start_time3);
-    std::cout << "find_ground duration: " << duration3.count() << " ms" << std::endl;
+    //     std::cout << "find_ground duration: " << duration3.count() << " ms" << std::endl;
 
     // 步骤4：计算高度差
     auto start_time4 = std::chrono::high_resolution_clock::now();
     get_HeightDiff();
     auto end_time4 = std::chrono::high_resolution_clock::now();
     auto duration4 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time4 - start_time4);
-    std::cout << "get_HeightDiff duration: " << duration4.count() << " ms" << std::endl;
+    //     std::cout << "get_HeightDiff duration: " << duration4.count() << " ms" << std::endl;
 
     // 步骤5：计算高度差v2
     auto start_time5 = std::chrono::high_resolution_clock::now();
     get_HeightDiff_v2();
     auto end_time5 = std::chrono::high_resolution_clock::now();
     auto duration5 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time5 - start_time5);
-    std::cout << "get_HeightDiff_v2 duration: " << duration5.count() << " ms" << std::endl;
+    //     std::cout << "get_HeightDiff_v2 duration: " << duration5.count() << " ms" << std::endl;
 
     // 步骤5：处理动态物体邻域
     // auto start_time5 = std::chrono::high_resolution_clock::now();
@@ -147,14 +147,14 @@ void GridMapHandler_v4::gridmap_process(const std::vector<PointXYZRGBValid>& col
     calculateSlope();
     auto end_time8 = std::chrono::high_resolution_clock::now();
     auto duration8 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time8 - start_time8);
-    std::cout << "calculateSlope duration: " << duration8.count() << " ms" << std::endl;
+    //     std::cout << "calculateSlope duration: " << duration8.count() << " ms" << std::endl;
 
     // 最后，显示高差图和RGB图（以自车为坐标系）
     auto start_time9 = std::chrono::high_resolution_clock::now();
     showMaps(body_pose.dr_heading);  // 传入车辆朝向
     auto end_time9 = std::chrono::high_resolution_clock::now();
     auto duration9 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time9 - start_time9);
-    std::cout << "showMaps duration: " << duration9.count() << " ms" << std::endl;
+    //     std::cout << "showMaps duration: " << duration9.count() << " ms" << std::endl;
 
     // 使用opencv可视化
     // auto start_time10 = std::chrono::high_resolution_clock::now();
@@ -813,7 +813,7 @@ void GridMapHandler_v4::showMaps(double current_heading) {
     // generateVisualization_v2(height_map, rgb_map, has_data, current_heading);
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << "generateVisualization duration: " << duration.count() << " ms" << std::endl;
+    //     std::cout << "generateVisualization duration: " << duration.count() << " ms" << std::endl;
 
     // 生成坡度图
     cv::Mat slope_map;
@@ -825,19 +825,19 @@ void GridMapHandler_v4::showMaps(double current_heading) {
     params->generateColorMap(height_map, has_data, "GridMap Height Diff");
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
-    std::cout << "generateColorMap duration: " << duration1.count() << " ms" << std::endl;
+    //     std::cout << "generateColorMap duration: " << duration1.count() << " ms" << std::endl;
 
     auto start_time2 = std::chrono::high_resolution_clock::now();
     params->generateRGBMap(rgb_map, has_data, "GridMap RGB");
     auto end_time2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time2 - start_time2);
-    std::cout << "generateRGBMap duration: " << duration2.count() << " ms" << std::endl;
+    //     std::cout << "generateRGBMap duration: " << duration2.count() << " ms" << std::endl;
 
     auto start_time3 = std::chrono::high_resolution_clock::now();
     generateSlopeColorMap(slope_map, has_data, "GridMap Slope");
     auto end_time3 = std::chrono::high_resolution_clock::now();
     auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time3 - start_time3);
-    std::cout << "generateSlopeVisualization duration: " << duration3.count() << " ms" << std::endl;
+    //     std::cout << "generateSlopeVisualization duration: " << duration3.count() << " ms" << std::endl;
 }
 
 void GridMapHandler_v4::generateVisualization(cv::Mat& height_map, cv::Mat& rgb_map, cv::Mat& has_data, double current_heading) {
@@ -1272,7 +1272,7 @@ void GridMapHandler_v4::opencv_showMaps(double current_heading) {
 
     auto end_time1_1 = std::chrono::high_resolution_clock::now();
     auto duration1_1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1_1 - start_time1_1);
-    std::cout << "opencv_showMaps duration1_1: " << duration1_1.count() << " ms" << std::endl;
+    //     std::cout << "opencv_showMaps duration1_1: " << duration1_1.count() << " ms" << std::endl;
 
 
     // 步骤2: 使用OpenCV仿射变换直接旋转整张图像
@@ -1309,14 +1309,14 @@ void GridMapHandler_v4::opencv_showMaps(double current_heading) {
 
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
-    std::cout << "opencv_showMaps duration1: " << duration1.count() << " ms" << std::endl;
+    //     std::cout << "opencv_showMaps duration1: " << duration1.count() << " ms" << std::endl;
     
     // 步骤3: 使用现有的generateColorMap函数进行可视化
     auto start_time2 = std::chrono::high_resolution_clock::now();
     params->generateColorMap(vehicle_height_mat, global_has_data, "GridMap Height Diff (Global Frame - Original Values)");
     auto end_time2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time2 - start_time2);
-    std::cout << "opencv_showMaps duration2: " << duration2.count() << " ms" << std::endl;
+    //     std::cout << "opencv_showMaps duration2: " << duration2.count() << " ms" << std::endl;
 
     std::cout << "OpenCV visualization completed - Height difference map with original meter values" << std::endl;
 } 

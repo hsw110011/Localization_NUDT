@@ -122,6 +122,12 @@ void my_config::readPara()
                 lidar_bev_ground_max_plane_tilt_deg = std::stod(value);
             else if (key == "lidar_bev_ground_fallback_quantile")
                 lidar_bev_ground_fallback_quantile = std::stod(value);
+            else if (key == "lidar_bev_ground_front_half_angle_deg")
+                lidar_bev_ground_front_half_angle_deg = std::stod(value);
+            else if (key == "b_lidar_bev_ground_require_forward")
+                b_lidar_bev_ground_require_forward = std::stoi(value);
+            else if (key == "lidar_bev_ground_failure_fallback_z")
+                lidar_bev_ground_failure_fallback_z = std::stod(value);
             else if (key == "lidar_bev_ground_min_points")
                 lidar_bev_ground_min_points = std::stoi(value);
             else if (key == "lidar_bev_height_quantile")

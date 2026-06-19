@@ -8,8 +8,29 @@
 #include <tf/tf.h>
 #ifdef _OPENMP
 #include <omp.h>
-#include "map/gridmap_handle_v2.h"
 #endif
+
+namespace {
+struct PointGridUpdate {
+    bool valid = false;
+    int row = 0;
+    int col = 0;
+    int point_car_row = 0;
+    int point_car_col = 0;
+    float z = 0.0f;
+    uint8_t r = 0;
+    uint8_t g = 0;
+    uint8_t b = 0;
+    bool has_rgb = false;
+};
+
+struct FarPointUpdate {
+    bool valid = false;
+    int row = 0;
+    int col = 0;
+    float z = 0.0f;
+};
+}  // namespace
 
 
 GridMapHandler_v2::GridMapHandler_v2()
@@ -92,9 +113,6 @@ void GridMapHandler_v2::initialize(double map_size_x, double map_size_y,
 
 void GridMapHandler_v2::gridmap_process(const std::vector<PointXYZRGBValid>& colored_car_points,
                             const self_state::LocalPose& body_pose) {
-    auto start_time0 = std::chrono::high_resolution_clock::now();
-
-
     // 安全检查：确保GridMap已初始化
     if(map_.getLayers().empty()) {
         std::cerr << "Error: GridMap not initialized! Call initialize() first." << std::endl;
@@ -186,10 +204,6 @@ void GridMapHandler_v2::gridmap_process(const std::vector<PointXYZRGBValid>& col
 
     // 重置绝对高度相关的层（为下一帧准备）
     resetAbsoluteHeightLayers();
-
-    auto end_time0 = std::chrono::high_resolution_clock::now();
-    auto duration0 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time0 - start_time0);
-    std::cout << "gridmap_process duration: " << duration0.count() << " ms" << std::endl;
 }
 
 void GridMapHandler_v2::updateMapPosition(const self_state::LocalPose& body_pose) {
@@ -211,7 +225,6 @@ void GridMapHandler_v2::processPointCloud(const std::vector<PointXYZRGBValid>& p
     const double sin_theta = sin(body_pose.dr_heading);
     const double dx = body_pose.dr_x;
     const double dy = body_pose.dr_y;
-    double tan_60=tan(PI/3);
 
     // 获取数据层引用，避免重复查找
     auto& min_height = map_["min_height"];      // 最小高度层
@@ -226,91 +239,100 @@ void GridMapHandler_v2::processPointCloud(const std::vector<PointXYZRGBValid>& p
     const grid_map::Size map_size = map_.getSize();
     auto& points_num = map_["points_num"];
 
-    uint8_t kernal_size = 5;
-    uint8_t half_kernal = kernal_size / 2;
+    const uint8_t kernal_size = 5;
+    const uint8_t half_kernal = kernal_size / 2;
+    const double half_size_x = map_size_x_ / 2.0;
+    const double half_size_y = map_size_y_ / 2.0;
+    const int map_rows = map_size(0);
+    const int map_cols = map_size(1);
 
-    // 直接处理每个点，更新栅格的最大最小值等信息
-    for(const auto& point : points) {
-        // 车体坐标范围过滤（前后左右50m，总共100×100m）
-        const double half_size_x = map_size_x_ / 2.0;  // 50m
-        const double half_size_y = map_size_y_ / 2.0;  // 50m
-        // 注意开区间
+    std::vector<PointGridUpdate> updates(points.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256)
+#endif
+    for (int i = 0; i < static_cast<int>(points.size()); ++i) {
+        const auto& point = points[static_cast<std::size_t>(i)];
+        PointGridUpdate& update = updates[static_cast<std::size_t>(i)];
+        update.valid = false;
+
         if(point.x <= -half_size_x || point.x >= half_size_x ||
            point.y <= -half_size_y || point.y >= half_size_y ||
            (params->b_enable_point_z_filter && point.z > params->point_z_max)) {
             continue;
         }
 
-        int point_car_col = static_cast<int>(std::floor((half_size_y-point.y) / resolution_));
-        int point_car_row = static_cast<int>(std::floor((half_size_x-point.x) / resolution_));
+        const int point_car_col =
+            static_cast<int>(std::floor((half_size_y - point.y) / resolution_));
+        const int point_car_row =
+            static_cast<int>(std::floor((half_size_x - point.x) / resolution_));
 
-        // 车体坐标 → 全局坐标
-        double world_x = cos_theta * point.x - sin_theta * point.y + dx;
-        double world_y = sin_theta * point.x + cos_theta * point.y + dy;
+        const double world_x = cos_theta * point.x - sin_theta * point.y + dx;
+        const double world_y = sin_theta * point.x + cos_theta * point.y + dy;
 
-        // 全局坐标 → GridMap索引
         grid_map::Position world_pos(world_x, world_y);
         grid_map::Index index;
+        if(!map_.getIndex(world_pos, index)) {
+            continue;
+        }
 
-        if(map_.getIndex(world_pos, index)) {
-            const int row = index(0);
-            const int col = index(1);
+        update.valid = true;
+        update.row = index(0);
+        update.col = index(1);
+        update.point_car_row = point_car_row;
+        update.point_car_col = point_car_col;
+        update.z = point.z;
+        update.has_rgb = point.has_rgb;
+        if (point.has_rgb) {
+            update.r = static_cast<uint8_t>(point.r);
+            update.g = static_cast<uint8_t>(point.g);
+            update.b = static_cast<uint8_t>(point.b);
+        }
+    }
 
-            //计算车体栅格索引
-            car_col(row, col) = point_car_col;
-            car_row(row, col) = point_car_row;
+    for (const PointGridUpdate& update : updates) {
+        if (!update.valid) {
+            continue;
+        }
 
-            // 计算点云数量
-            points_num(row, col) += 1;
+        const int row = update.row;
+        const int col = update.col;
 
-            // if(point.x > 4){
-            //     if(abs(point.y) < (point.x - 4) * tan_60 && abs(point.y) < 15){
-                    intrested_flag(row, col) = 1; //标记为感兴趣区域
-                    for(int dr = -half_kernal; dr <= half_kernal; ++dr) {
-                        for(int dc = -half_kernal; dc <= half_kernal; ++dc) {
-                            int neighbor_row = row + dr;
-                            int neighbor_col = col + dc;
+        car_col(row, col) = update.point_car_col;
+        car_row(row, col) = update.point_car_row;
+        points_num(row, col) += 1;
+        intrested_flag(row, col) = 1;
+        for(int dr = -half_kernal; dr <= half_kernal; ++dr) {
+            for(int dc = -half_kernal; dc <= half_kernal; ++dc) {
+                const int neighbor_row = row + dr;
+                const int neighbor_col = col + dc;
+                if(neighbor_row >= 0 && neighbor_row < map_rows &&
+                   neighbor_col >= 0 && neighbor_col < map_cols) {
+                    intrested_flag(neighbor_row, neighbor_col) = 1;
+                }
+            }
+        }
 
-                            // 检查邻域栅格是否在地图范围内
-                            if(neighbor_row >= 0 && neighbor_row < map_size(0) &&
-                                neighbor_col >= 0 && neighbor_col < map_size(1)) {
-                                intrested_flag(neighbor_row, neighbor_col) = 1;
-                            }
-                        }
-                    }
-            //     }
-            // }
-            
-            // 直接更新栅格的最大最小高度
-            if(std::isnan(min_height(row, col))) {
-                // 第一次访问该栅格，初始化
-                min_height(row, col) = point.z;
-                max_height(row, col) = point.z;
-
-                // 使用第一个点的RGB信息
-                if(point.has_rgb) {
-                    rgb_r(row, col) = static_cast<float>(point.r);
-                    rgb_g(row, col) = static_cast<float>(point.g);
-                    rgb_b(row, col) = static_cast<float>(point.b);
+        if(std::isnan(min_height(row, col))) {
+            min_height(row, col) = update.z;
+            max_height(row, col) = update.z;
+            if(update.has_rgb) {
+                rgb_r(row, col) = static_cast<float>(update.r);
+                rgb_g(row, col) = static_cast<float>(update.g);
+                rgb_b(row, col) = static_cast<float>(update.b);
+                has_valid_color(row, col) = 1.0f;
+            }
+        } else {
+            if(update.z > max_height(row, col)) {
+                max_height(row, col) = update.z;
+                if(update.has_rgb) {
+                    rgb_r(row, col) = static_cast<float>(update.r);
+                    rgb_g(row, col) = static_cast<float>(update.g);
+                    rgb_b(row, col) = static_cast<float>(update.b);
                     has_valid_color(row, col) = 1.0f;
                 }
-            } else {
-                // 更新最高点和最低点
-                if(point.z > max_height(row, col)) {
-                    max_height(row, col) = point.z;
-
-                    // 使用最高点的RGB信息（最高点策略）
-                    if(point.has_rgb) {
-                        rgb_r(row, col) = static_cast<float>(point.r);
-                        rgb_g(row, col) = static_cast<float>(point.g);
-                        rgb_b(row, col) = static_cast<float>(point.b);
-                        has_valid_color(row, col) = 1.0f;
-                    }
-                }
-
-                if(point.z < min_height(row, col)) {
-                    min_height(row, col) = point.z;
-                }
+            }
+            if(update.z < min_height(row, col)) {
+                min_height(row, col) = update.z;
             }
         }
     }
@@ -333,10 +355,15 @@ void GridMapHandler_v2::find_ground() {
     const uint8_t kernel_size = 3;
     const uint8_t half_kernel = kernel_size / 2;  // 3x3邻域，半径为1
     const grid_map::Size map_size = map_.getSize();
+    const int rows = map_size(0);
+    const int cols = map_size(1);
 
     // 遍历所有栅格
-    for(int row = 0; row < map_size(0); ++row) {
-        for(int col = 0; col < map_size(1); ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for(int row = 0; row < rows; ++row) {
+        for(int col = 0; col < cols; ++col) {
             // 只处理有数据的栅格
             if(std::isnan(min_height(row, col))) {
                 continue;
@@ -351,8 +378,8 @@ void GridMapHandler_v2::find_ground() {
                     int neighbor_col = col + dc;
 
                     // 检查邻域栅格是否在地图范围内
-                    if(neighbor_row >= 0 && neighbor_row < map_size(0) &&
-                       neighbor_col >= 0 && neighbor_col < map_size(1)) {
+                    if(neighbor_row >= 0 && neighbor_row < rows &&
+                       neighbor_col >= 0 && neighbor_col < cols) {
 
                         if(!std::isnan(min_height(neighbor_row, neighbor_col))) {
                             neighbor_min = std::min(neighbor_min, static_cast<float>(min_height(neighbor_row, neighbor_col)));
@@ -436,12 +463,15 @@ void GridMapHandler_v2::get_HeightDiff() {
     auto& intrested_flag = map_["intrested_flag"];
 
     const grid_map::Size map_size = map_.getSize();
-    const uint8_t kernel_size = 3;
-    const uint8_t half_kernel = kernel_size / 2;
+    const int rows = map_size(0);
+    const int cols = map_size(1);
 
     // 遍历所有栅格
-    for(int row = 0; row < map_size(0); ++row) {
-        for(int col = 0; col < map_size(1); ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for(int row = 0; row < rows; ++row) {
+        for(int col = 0; col < cols; ++col) {
 
             // 当前栅格有值
             if(!std::isnan(ground_height(row, col))) {
@@ -520,10 +550,15 @@ void GridMapHandler_v2::get_HeightDiff_v2()
     const grid_map::Size map_size = map_.getSize();
     const uint8_t kernel_size = 5;
     const uint8_t half_kernel = kernel_size / 2;
+    const int rows = map_size(0);
+    const int cols = map_size(1);
 
     // 遍历所有栅格
-    for(int row = 0; row < map_size(0); ++row) {
-        for(int col = 0; col < map_size(1); ++col) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for(int row = 0; row < rows; ++row) {
+        for(int col = 0; col < cols; ++col) {
 
             // 当前栅格没值
             if(std::isnan(ground_height(row, col))) {
@@ -542,8 +577,8 @@ void GridMapHandler_v2::get_HeightDiff_v2()
                                 int neighbor_col = col + dc;
 
                                 // 检查邻域栅格是否在地图范围内
-                                if (neighbor_row >= 0 && neighbor_row < map_size(0) &&
-                                    neighbor_col >= 0 && neighbor_col < map_size(1))
+                                if (neighbor_row >= 0 && neighbor_row < rows &&
+                                    neighbor_col >= 0 && neighbor_col < cols)
                                 {
                                     // 修复：检查邻域栅格是否存在当前值
                                     if (!std::isnan(ground_height(neighbor_row, neighbor_col)))
@@ -717,14 +752,15 @@ void GridMapHandler_v2::calculateSlope()
     auto &ground_height = map_["ground_height"];
     auto &slope = map_["slope"];
     const grid_map::Size map_size = map_.getSize();
+    const int rows = map_size(0);
+    const int cols = map_size(1);
 
     // 遍历所有栅格计算坡度
-    for (grid_map::GridMapIterator iterator(map_); !iterator.isPastEnd(); ++iterator)
-    {
-        const grid_map::Index index(*iterator);
-        const int row = index(0);
-        const int col = index(1);
-
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (int row = 0; row < rows; ++row) {
+        for (int col = 0; col < cols; ++col) {
         // 只处理有有效高度差的栅格
         if (std::isnan(ground_height(row, col)))
         {
@@ -734,7 +770,7 @@ void GridMapHandler_v2::calculateSlope()
         // 计算X方向梯度（左右相邻栅格）
         float grad_x = 0.0f;
         bool has_grad_x = false;
-        if (col > 0 && col < map_size(1) - 1)
+        if (col > 0 && col < cols - 1)
         {
             if (!std::isnan(ground_height(row, col - 1)) && !std::isnan(ground_height(row, col + 1)))
             {
@@ -746,7 +782,7 @@ void GridMapHandler_v2::calculateSlope()
         // 计算Y方向梯度（上下相邻栅格）
         float grad_y = 0.0f;
         bool has_grad_y = false;
-        if (row > 0 && row < map_size(0) - 1)
+        if (row > 0 && row < rows - 1)
         {
             if (!std::isnan(ground_height(row - 1, col)) && !std::isnan(ground_height(row + 1, col)))
             {
@@ -780,6 +816,7 @@ void GridMapHandler_v2::calculateSlope()
         }
         else{
             slope(row, col) = slope(row, col) * (1 - new_weight) + new_weight * slope_angle;
+        }
         }
     }
 }
@@ -1250,14 +1287,8 @@ void GridMapHandler_v2::showMaps(double current_heading) {
 
     // 生成可视化图像（以自车为坐标系）
     cv::Mat height_map, rgb_map, has_data;
-
-    // 测试原版本性能
-    auto start_time = std::chrono::high_resolution_clock::now();
     generateVisualization(height_map, rgb_map, has_data, current_heading);
     // generateVisualization_v2(height_map, rgb_map, has_data, current_heading);
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << "generateVisualization duration: " << duration.count() << " ms" << std::endl;
 
     // 生成坡度图
     cv::Mat slope_map;
@@ -1265,29 +1296,17 @@ void GridMapHandler_v2::showMaps(double current_heading) {
 
     // 使用您现有的可视化方法（保持一致性）
     // height_map 已经包含了高度差信息，高度差BEV可视化暂时关闭。
-    auto start_time1 = std::chrono::high_resolution_clock::now();
     // params->generateColorMap(height_map, has_data, "GridMap Height Diff");
-    auto end_time1 = std::chrono::high_resolution_clock::now();
-    auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
-    std::cout << "generateColorMap duration: " << duration1.count() << " ms" << std::endl;
-
-    auto start_time2 = std::chrono::high_resolution_clock::now();
     params->generateRGBMap(rgb_map, has_data, "GridMap RGB");
-    auto end_time2 = std::chrono::high_resolution_clock::now();
-    auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time2 - start_time2);
-    std::cout << "generateRGBMap duration: " << duration2.count() << " ms" << std::endl;
-
-    auto start_time3 = std::chrono::high_resolution_clock::now();
     generateSlopeColorMap(slope_map, has_data, "GridMap Slope");
-    auto end_time3 = std::chrono::high_resolution_clock::now();
-    auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time3 - start_time3);
-    std::cout << "generateSlopeVisualization duration: " << duration3.count() << " ms" << std::endl;
 }
 
-void GridMapHandler_v2::generateVisualization(cv::Mat& height_map, cv::Mat& rgb_map, cv::Mat& has_data, double current_heading) {
+void GridMapHandler_v2::generateVisualization(cv::Mat& height_map, cv::Mat& rgb_map, cv::Mat& has_data, double current_heading, bool include_rgb) {
     // 初始化输出图像
     height_map = cv::Mat::zeros(img_rows_, img_cols_, CV_32FC1);
-    rgb_map = cv::Mat::zeros(img_rows_, img_cols_, CV_8UC3);
+    if (include_rgb) {
+        rgb_map = cv::Mat::zeros(img_rows_, img_cols_, CV_8UC3);
+    }
     has_data = cv::Mat::zeros(img_rows_, img_cols_, CV_8UC1);
 
     // 预计算常量值（避免重复计算）
@@ -1314,7 +1333,7 @@ void GridMapHandler_v2::generateVisualization(cv::Mat& height_map, cv::Mat& rgb_
     // 获取直接指针访问，提高内存访问效率
     uint8_t* has_data_ptr = has_data.ptr<uint8_t>();
     float* height_ptr = height_map.ptr<float>();
-    cv::Vec3b* rgb_ptr = rgb_map.ptr<cv::Vec3b>();
+    cv::Vec3b* rgb_ptr = include_rgb ? rgb_map.ptr<cv::Vec3b>() : nullptr;
 
     // 遍历图像像素（优化版本 + 并行化）
     #ifdef _OPENMP
@@ -1352,24 +1371,26 @@ void GridMapHandler_v2::generateVisualization(cv::Mat& height_map, cv::Mat& rgb_
                     has_data_ptr[pixel_idx] = 255;
                     height_ptr[pixel_idx] = elev_val;
 
-                    uint8_t r, g, b;
-                    if(has_valid_color(row, col) > 0.5f) {
-                        r = rgb_r(row, col);
-                        g = rgb_g(row, col);
-                        b = rgb_b(row, col);
-                    } else {
-                        // 默认灰色
-                        r = g = b = 128;
-                    }
+                    if (include_rgb) {
+                        uint8_t r, g, b;
+                        if(has_valid_color(row, col) > 0.5f) {
+                            r = rgb_r(row, col);
+                            g = rgb_g(row, col);
+                            b = rgb_b(row, col);
+                        } else {
+                            // 默认灰色
+                            r = g = b = 128;
+                        }
 
-                    // test ,看一下动态区域
-                    if(dynamic_flag(row, col) > 0.5f) {
-                        r = 255;
-                        g = 0;
-                        b = 0;
-                    }
+                        // test ,看一下动态区域
+                        if(dynamic_flag(row, col) > 0.5f) {
+                            r = 255;
+                            g = 0;
+                            b = 0;
+                        }
 
-                    rgb_ptr[pixel_idx] = cv::Vec3b(b, g, r);  // OpenCV是BGR
+                        rgb_ptr[pixel_idx] = cv::Vec3b(b, g, r);  // OpenCV是BGR
+                    }
                 } 
             }
         }
@@ -1700,7 +1721,8 @@ void GridMapHandler_v2::opencv_showMaps(double current_heading) {
     auto start_time1 = std::chrono::high_resolution_clock::now();
     cv::Mat vehicle_rgb_mat;
     cv::Mat vehicle_has_data;
-    generateVisualization(vehicle_height_mat, vehicle_rgb_mat, vehicle_has_data, current_heading);
+    const bool include_rgb = params->b_show_rgb_map;
+    generateVisualization(vehicle_height_mat, vehicle_rgb_mat, vehicle_has_data, current_heading, include_rgb);
     auto mid_time1 = std::chrono::high_resolution_clock::now();
     auto duration_mid1 = std::chrono::duration_cast<std::chrono::milliseconds>(mid_time1 - start_time1);
     // std::cout << "opencv_showMaps target-grid height: " << duration_mid1.count() << " ms" << std::endl;
@@ -1712,7 +1734,7 @@ void GridMapHandler_v2::opencv_showMaps(double current_heading) {
     // std::cout << "opencv_showMaps height draw: " << duration1.count() << " ms" << std::endl;
 
     auto start_time3 = std::chrono::high_resolution_clock::now();
-    if (!vehicle_rgb_mat.empty()) {
+    if (include_rgb && !vehicle_rgb_mat.empty()) {
         auto mid_time3 = std::chrono::high_resolution_clock::now();
         auto duration_mid3 = std::chrono::duration_cast<std::chrono::milliseconds>(mid_time3 - start_time3);
         // std::cout << "opencv_showMaps target-grid RGB: " << duration_mid3.count() << " ms" << std::endl;
@@ -1723,7 +1745,7 @@ void GridMapHandler_v2::opencv_showMaps(double current_heading) {
     }
 
     auto start_time4 = std::chrono::high_resolution_clock::now();
-    if (map_.exists("slope")) {
+    if (params->b_show_slope_map && map_.exists("slope")) {
         cv::Mat vehicle_slope_mat;
         cv::Mat vehicle_slope_has_data = vehicle_has_data.clone();
         generateSlopeVisualization(vehicle_slope_mat, vehicle_slope_has_data, current_heading);
@@ -1764,36 +1786,51 @@ cv::Mat GridMapHandler_v2::processFarRangePoints(const std::vector<PointXYZRGBVa
     cv::Mat min_height = cv::Mat::ones(rows, cols, CV_32F) * 1000.0f; // 初始化为很大的值
     cv::Mat point_count = cv::Mat::zeros(rows, cols, CV_32S);
 
-    // 投影点云到栅格
-    int valid_points = 0;
-    for(const auto& point : colored_points) {
-        // 检查点是否在远距离区域内
+    std::vector<FarPointUpdate> updates(colored_points.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256)
+#endif
+    for (int i = 0; i < static_cast<int>(colored_points.size()); ++i) {
+        const auto& point = colored_points[static_cast<std::size_t>(i)];
+        FarPointUpdate& update = updates[static_cast<std::size_t>(i)];
+        update.valid = false;
+
         if(point.x >= x_min && point.x <= x_max &&
            point.y >= point_y_min && point.y <= point_y_max) {
-
-            // 计算栅格索引
-            int col = static_cast<int>((-point.y + y_max) / grid_size);
-            int row = static_cast<int>((-point.x + x_max) / grid_size);
-
-            // 边界检查
+            const int col = static_cast<int>((-point.y + y_max) / grid_size);
+            const int row = static_cast<int>((-point.x + x_max) / grid_size);
             if(row >= 0 && row < rows && col >= 0 && col < cols) {
-                // 更新高度统计
-                float& max_h = max_height.at<float>(row, col);
-                float& min_h = min_height.at<float>(row, col);
-                int& count = point_count.at<int>(row, col);
-
-                max_h = std::max(max_h, point.z);
-                min_h = std::min(min_h, point.z);
-                count++;
-                valid_points++;
+                update.valid = true;
+                update.row = row;
+                update.col = col;
+                update.z = point.z;
             }
         }
+    }
+
+    int valid_points = 0;
+    for (const FarPointUpdate& update : updates) {
+        if (!update.valid) {
+            continue;
+        }
+
+        float& max_h = max_height.at<float>(update.row, update.col);
+        float& min_h = min_height.at<float>(update.row, update.col);
+        int& count = point_count.at<int>(update.row, update.col);
+
+        max_h = std::max(max_h, update.z);
+        min_h = std::min(min_h, update.z);
+        ++count;
+        ++valid_points;
     }
 
     // 计算高度差矩阵
     cv::Mat height_diff = cv::Mat::zeros(rows, cols, CV_32F);
     int valid_cells = 0;
 
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) reduction(+:valid_cells)
+#endif
     for(int row = 0; row < rows; ++row) {
         for(int col = 0; col < cols; ++col) {
             int count = point_count.at<int>(row, col);
@@ -1804,7 +1841,7 @@ cv::Mat GridMapHandler_v2::processFarRangePoints(const std::vector<PointXYZRGBVa
                 // 如果最小高度还是初始值，说明没有有效点
                 if(min_h < 999.0f) {
                     height_diff.at<float>(row, col) = max_h - min_h;
-                    valid_cells++;
+                    ++valid_cells;
                 }
             }
         }
@@ -1821,8 +1858,6 @@ cv::Mat GridMapHandler_v2::processFarRangePoints(const std::vector<PointXYZRGBVa
 
 // 障碍物检测 - 分区域处理：近处3×3，远处5×5
 void GridMapHandler_v2::obstacle_detection(cv::Mat& vehicle_height_mat, cv::Mat& far_range_height_diff) {
-    
-    auto start_time1 = std::chrono::high_resolution_clock::now();
     near_obstacles_.clear();
     far_obstacles_.clear();
     
@@ -1989,16 +2024,9 @@ void GridMapHandler_v2::obstacle_detection(cv::Mat& vehicle_height_mat, cv::Mat&
     // std::cout << "总检测结果: " << (near_detection_count + far_detection_count) << "个障碍物" << std::endl;
 
     // ========== 统一可视化：显示-50到100m的障碍物图 ==========
-    auto vis_start_time = std::chrono::high_resolution_clock::now();
     visualizeCombinedObstacleDetection(vehicle_height_mat, far_range_height_diff,
                                      near_detection_mat, far_detection_mat,
                                      near_obstacle_mat, far_obstacle_mat);
-    auto vis_end_time = std::chrono::high_resolution_clock::now();
-    auto vis_duration = std::chrono::duration_cast<std::chrono::milliseconds>(vis_end_time - vis_start_time);
-    // std::cout << "统一可视化耗时: " << vis_duration.count() << "ms" << std::endl;
-
-    auto total_duration = std::chrono::duration_cast<std::chrono::milliseconds>(vis_end_time - start_time1);
-    std::cout << "obstacle_detection 总耗时: " << total_duration.count() << "ms" << std::endl;
 }
 
 // 统一可视化函数：显示从-50到100m的障碍物检测结果

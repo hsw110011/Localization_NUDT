@@ -226,6 +226,9 @@ public:
     double lidar_bev_ground_ransac_distance = 0.18;
     double lidar_bev_ground_max_plane_tilt_deg = 25.0;
     double lidar_bev_ground_fallback_quantile = 0.35;
+    double lidar_bev_ground_front_half_angle_deg = 7.5;
+    bool b_lidar_bev_ground_require_forward = true;
+    double lidar_bev_ground_failure_fallback_z = 0.0;
     int lidar_bev_ground_min_points = 30;
     double lidar_bev_height_quantile = 0.90;
     int lidar_bev_cell_max_points = 500;

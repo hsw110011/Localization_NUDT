@@ -94,28 +94,28 @@ void GridMapHandler::gridmap_process(const std::vector<PointXYZRGBValid>& colore
     updateMapPosition(body_pose);
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
-    std::cout << "updateMapPosition duration: " << duration1.count() << " ms" << std::endl;
+    //     std::cout << "updateMapPosition duration: " << duration1.count() << " ms" << std::endl;
 
     // 步骤2：批量处理点云数据
     auto start_time2 = std::chrono::high_resolution_clock::now();
     processPointCloud(colored_car_points, body_pose);
     auto end_time2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time2 - start_time2);
-    std::cout << "processPointCloud duration: " << duration2.count() << " ms" << std::endl;
+    //     std::cout << "processPointCloud duration: " << duration2.count() << " ms" << std::endl;
 
     // 步骤3：寻找地面基准（3x3邻域）
     auto start_time3 = std::chrono::high_resolution_clock::now();
     find_ground();
     auto end_time3 = std::chrono::high_resolution_clock::now();
     auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time3 - start_time3);
-    std::cout << "find_ground duration: " << duration3.count() << " ms" << std::endl;
+    //     std::cout << "find_ground duration: " << duration3.count() << " ms" << std::endl;
 
     // 步骤4：计算高度差
     auto start_time4 = std::chrono::high_resolution_clock::now();
     get_HeightDiff();
     auto end_time4 = std::chrono::high_resolution_clock::now();
     auto duration4 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time4 - start_time4);
-    std::cout << "get_HeightDiff duration: " << duration4.count() << " ms" << std::endl;
+    //     std::cout << "get_HeightDiff duration: " << duration4.count() << " ms" << std::endl;
 
     // 步骤5：处理动态物体邻域
     // auto start_time5 = std::chrono::high_resolution_clock::now();
@@ -132,21 +132,21 @@ void GridMapHandler::gridmap_process(const std::vector<PointXYZRGBValid>& colore
     fillHoles();
     auto end_time7 = std::chrono::high_resolution_clock::now();
     auto duration7 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time7 - start_time7);
-    std::cout << "fillHoles duration: " << duration7.count() << " ms" << std::endl;
+    //     std::cout << "fillHoles duration: " << duration7.count() << " ms" << std::endl;
 
     // 步骤8：计算坡度
     auto start_time8 = std::chrono::high_resolution_clock::now();
     calculateSlope();
     auto end_time8 = std::chrono::high_resolution_clock::now();
     auto duration8 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time8 - start_time8);
-    std::cout << "calculateSlope duration: " << duration8.count() << " ms" << std::endl;
+    //     std::cout << "calculateSlope duration: " << duration8.count() << " ms" << std::endl;
 
     // 最后，显示高差图和RGB图（以自车为坐标系）
     auto start_time9 = std::chrono::high_resolution_clock::now();
     showMaps(body_pose.dr_heading);  // 传入车辆朝向
     auto end_time9 = std::chrono::high_resolution_clock::now();
     auto duration9 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time9 - start_time9);
-    std::cout << "showMaps duration: " << duration9.count() << " ms" << std::endl;
+    //     std::cout << "showMaps duration: " << duration9.count() << " ms" << std::endl;
 }
 
 void GridMapHandler::updateMapPosition(const self_state::LocalPose& body_pose) {
@@ -608,7 +608,7 @@ void GridMapHandler::showMaps(double current_heading) {
     // generateVisualization_v2(height_map, rgb_map, has_data, current_heading);
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << "generateVisualization duration: " << duration.count() << " ms" << std::endl;
+    //     std::cout << "generateVisualization duration: " << duration.count() << " ms" << std::endl;
 
     // 生成坡度图
     cv::Mat slope_map;
@@ -620,13 +620,13 @@ void GridMapHandler::showMaps(double current_heading) {
     params->generateColorMap(height_map, has_data, "GridMap Height Diff");
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
-    std::cout << "generateColorMap duration: " << duration1.count() << " ms" << std::endl;
+    //     std::cout << "generateColorMap duration: " << duration1.count() << " ms" << std::endl;
 
     auto start_time2 = std::chrono::high_resolution_clock::now();
     params->generateRGBMap(rgb_map, has_data, "GridMap RGB");
     auto end_time2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time2 - start_time2);
-    std::cout << "generateRGBMap duration: " << duration2.count() << " ms" << std::endl;
+    //     std::cout << "generateRGBMap duration: " << duration2.count() << " ms" << std::endl;
 
     // auto start_time3 = std::chrono::high_resolution_clock::now();
     // params->generateColorMap(slope_map, has_data, "GridMap Slope");

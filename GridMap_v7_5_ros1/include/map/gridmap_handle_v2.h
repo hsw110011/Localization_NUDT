@@ -67,7 +67,11 @@ public:
      * @param has_data 输出数据掩码图
      * @param current_heading 当前车辆朝向（弧度）
      */
-    void generateVisualization(cv::Mat& height_map, cv::Mat& rgb_map, cv::Mat& has_data, double current_heading = 0.0);
+    void generateVisualization(cv::Mat& height_map,
+                             cv::Mat& rgb_map,
+                             cv::Mat& has_data,
+                             double current_heading = 0.0,
+                             bool include_rgb = true);
 
     /**
      * @brief 生成坡度可视化图像

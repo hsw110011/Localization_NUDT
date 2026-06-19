@@ -6,8 +6,8 @@ from catkin_pkg.python_setup import generate_distutils_setup
 
 
 setup_args = generate_distutils_setup(
-    packages=["loc_bev"],
-    package_dir={"": "python"},
+    packages=["loc_tool"],
+    package_dir={"": "."},
 )
 
 setup(**setup_args)

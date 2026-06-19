@@ -85,7 +85,7 @@ void GridMapHandler_v3::process(const std::vector<PointXYZRGBValid>& colored_car
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-    std::cout << "[GridMapHandler_v3] 处理时间: " << duration.count() << " ms" << std::endl;
+    //     std::cout << "[GridMapHandler_v3] 处理时间: " << duration.count() << " ms" << std::endl;
 }
 
 bool GridMapHandler_v3::isPointInRange(const PointXYZRGBValid& point)

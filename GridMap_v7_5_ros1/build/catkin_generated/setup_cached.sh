@@ -8,5 +8,5 @@
 
 # modified environment variables
 export CMAKE_PREFIX_PATH="/home/hsw/catkin_ws/program/GridMap_v7_5_ros1/build/devel:$CMAKE_PREFIX_PATH"
-export ROSLISP_PACKAGE_DIRECTORIES='/home/hsw/catkin_ws/program/GridMap_v7_5_ros1/build/devel/share/common-lisp'
+export ROSLISP_PACKAGE_DIRECTORIES="/home/hsw/catkin_ws/program/GridMap_v7_5_ros1/build/devel/share/common-lisp:$ROSLISP_PACKAGE_DIRECTORIES"
 export ROS_PACKAGE_PATH="/home/hsw/catkin_ws/program/GridMap_v7_5_ros1:$ROS_PACKAGE_PATH"

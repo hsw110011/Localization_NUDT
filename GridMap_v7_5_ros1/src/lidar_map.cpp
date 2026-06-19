@@ -89,7 +89,7 @@ void LidarMap::process(const std::vector<PointXYZRGBValid> &colored_car_points, 
 
     auto end_time1 = std::chrono::high_resolution_clock::now();
     auto duration1 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time1 - start_time1);
-    std::cout << "time 1: " << duration1.count() << " ms" << std::endl;
+    //     std::cout << "time 1: " << duration1.count() << " ms" << std::endl;
 
     // 计算栅格高度差
     auto start_time2 = std::chrono::high_resolution_clock::now();
@@ -117,7 +117,7 @@ void LidarMap::process(const std::vector<PointXYZRGBValid> &colored_car_points, 
     }
     auto end_time2 = std::chrono::high_resolution_clock::now();
     auto duration2 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time2 - start_time2);
-    std::cout << "time2: " << duration2.count() << " ms" << std::endl;
+    //     std::cout << "time2: " << duration2.count() << " ms" << std::endl;
 
     //更新历史地图中当前传感器范围内的地图信息
     auto start_time3 = std::chrono::high_resolution_clock::now();    
@@ -206,7 +206,7 @@ void LidarMap::process(const std::vector<PointXYZRGBValid> &colored_car_points, 
     }
     auto end_time3 = std::chrono::high_resolution_clock::now();
     auto duration3 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time3 - start_time3);
-    std::cout << "time3: " << duration3.count() << " ms" << std::endl;
+    //     std::cout << "time3: " << duration3.count() << " ms" << std::endl;
 
     // 绘制累计地图
     auto start_time4 = std::chrono::high_resolution_clock::now();
@@ -304,14 +304,14 @@ void LidarMap::process(const std::vector<PointXYZRGBValid> &colored_car_points, 
     }
     auto end_time4 = std::chrono::high_resolution_clock::now();
     auto duration4 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time4 - start_time4);
-    std::cout << "time4: " << duration4.count() << " ms" << std::endl;
+    //     std::cout << "time4: " << duration4.count() << " ms" << std::endl;
 
     auto start_time5 = std::chrono::high_resolution_clock::now(); 
     params->generateColorMap(height_map, has_data, "Lidar Height Map");
     params->generateRGBMap(rgb_map, has_data, "Lidar RGB Map");
     auto end_time5 = std::chrono::high_resolution_clock::now();
     auto duration5 = std::chrono::duration_cast<std::chrono::milliseconds>(end_time5 - start_time5);
-    std::cout << "time5: " << duration5.count() << " ms" << std::endl;
+    //     std::cout << "time5: " << duration5.count() << " ms" << std::endl;
     // params->generateColorMap(min_height_map, has_data, "Lidar Min Height Map");
 
 }

@@ -90,12 +90,6 @@ message(STATUS "Included Headers from: ${PROJECT_SOURCE_DIR}/src/include")
 
 catkin_install_python(PROGRAMS
   scripts/localization_python.py
-  scripts/lidar_height_pf_localization.py
   scripts/test_cinterface.py
-  scripts/visualize_terrain_roughness.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
-
-install(DIRECTORY config/
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}/config
 )

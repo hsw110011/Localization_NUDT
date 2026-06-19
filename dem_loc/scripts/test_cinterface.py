@@ -1,18 +1,43 @@
 #!/usr/bin/env python3
-"""Print data received by the Python CInterface subscribers."""
+"""ROS 话题连通性调试工具 — 打印 CInterface 订阅的所有话题数据摘要。
+
+配合 localization_python.py 使用：在跑主程序前先确认 GlobalPose、LocalPose、
+/lidar_bev/grid_map 等话题是否正常发布。
+
+用法:
+    source /home/hsw/catkin_ws/devel/setup.bash
+    rosrun loc_bev test_cinterface.py
+
+    # 打印完整消息体，收到一轮后退出
+    rosrun loc_bev test_cinterface.py _print_full_message:=true _once:=true
+
+    # 持续打印所有 topic（含未更新的）
+    rosrun loc_bev test_cinterface.py _print_only_changed:=false
+
+主要 ROS 私有参数:
+    rate                  轮询频率 Hz，默认 2.0
+    print_full_message    打印完整 ROS 消息体，默认 false
+    print_only_changed    仅打印有 refreshflag 的 topic，默认 true
+    max_full_chars        完整消息最大字符数，默认 4000
+    once                  打印一轮后退出，默认 false
+
+依赖模块:
+    loc_tool.cinterface     ROS 话题订阅（与 C++ CInterface 对应）
+    loc_tool.common_struct  InputData 数据结构
+"""
 
 import math
 import os
 import sys
 
-_PYTHON_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python"))
-if _PYTHON_DIR not in sys.path:
-    sys.path.insert(0, _PYTHON_DIR)
+_PKG_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _PKG_ROOT not in sys.path:
+    sys.path.insert(0, _PKG_ROOT)
 
 import rospy
 
-from loc_bev.cinterface import CInterface, TOPIC_DEFINITIONS
-from loc_bev.common_struct import InputData
+from loc_tool.cinterface import CInterface, TOPIC_DEFINITIONS
+from loc_tool.common_struct import InputData
 
 
 def _fmt(value, precision=3):
@@ -135,14 +160,26 @@ def summarize_message(name, msg):
     if name in ("Odom", "NavsatOdom"):
         return _odom_summary(name, msg)
 
-    if name == "BevMasks":
+    if name == "LidarBevGridMap":
+        info = getattr(msg, "info", None)
+        header = _stamp_summary(getattr(info, "header", None)) if info is not None else ""
+        resolution = getattr(info, "resolution", None) if info is not None else None
+        length = getattr(info, "length_x", None), getattr(info, "length_y", None)
+        layers = list(getattr(msg, "layers", []) or [])
+        data_blocks = getattr(msg, "data", []) or []
+        data_lens = []
+        try:
+            data_lens = [len(block.data) for block in data_blocks]
+        except TypeError:
+            data_lens = []
         parts = [
-            _stamp_summary(getattr(msg, "header", None)),
-            "height={}".format(msg.height),
-            "width={}".format(msg.width),
-            "encoding={}".format(msg.encoding),
-            "step={}".format(msg.step),
-            _array_summary("data", msg.data),
+            header,
+            "resolution={}".format(_fmt(resolution)) if resolution is not None else "",
+            "length=({}, {})".format(_fmt(length[0]), _fmt(length[1]))
+            if all(value is not None for value in length)
+            else "",
+            "layers={}".format(layers),
+            "data_lens={}".format(data_lens),
         ]
         return "{}: {}".format(name, ", ".join(part for part in parts if part))
 

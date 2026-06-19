@@ -11,13 +11,24 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <utility>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 namespace {
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
-constexpr double kSurfaceTopHeightFraction = 0.15;  
+constexpr double kSurfaceTopHeightFraction = 0.15;
+
+struct BevFrameSample {
+    bool valid = false;
+    std::size_t linear_index = 0;
+    float z = 0.0f;
+};  
 
 bool isFinite(double value)
 {
@@ -52,6 +63,8 @@ void LidarBevBuilder::configure(const Config& config)
         std::swap(config_.ground_candidate_min_z, config_.ground_candidate_max_z);
     }
     config_.ground_min_points = std::max(1, config_.ground_min_points);
+    config_.ground_front_half_angle_deg =
+        std::max(0.1, std::min(89.9, config_.ground_front_half_angle_deg));
     config_.cell_max_points = std::max(0, config_.cell_max_points);
     config_.debug_window_stride = std::max(1, config_.debug_window_stride);
     config_.edge_min_valid_neighbors =
@@ -72,11 +85,73 @@ void LidarBevBuilder::initializeMap(const std::string& frame_id, const grid_map:
     map_.setGeometry(grid_map::Length(config_.map_size_x, config_.map_size_y),
                      config_.resolution,
                      center);
+    map_initialized_ = true;
+    updateMapIndexLookup();
+    resetMapLayers();
+}
 
+void LidarBevBuilder::ensureMap(const std::string& frame_id, const grid_map::Position& center)
+{
+    const bool same_geometry =
+        map_initialized_ &&
+        std::abs(map_.getResolution() - config_.resolution) < 1e-9 &&
+        std::abs(map_.getLength().x() - config_.map_size_x) < 1e-6 &&
+        std::abs(map_.getLength().y() - config_.map_size_y) < 1e-6 &&
+        map_.getFrameId() == frame_id;
+
+    if (!same_geometry) {
+        initializeMap(frame_id, center);
+        return;
+    }
+
+    map_.setPosition(center);
+    resetMapLayers();
+}
+
+void LidarBevBuilder::resetMapLayers()
+{
     map_["H_rel_surf"].setConstant(kNaN);
     map_["G_long_L"].setConstant(kNaN);
     map_["G_lat_L"].setConstant(kNaN);
     map_["M_L"].setConstant(0.0f);
+}
+
+void LidarBevBuilder::updateMapIndexLookup()
+{
+    map_rows_ = map_.getSize()(0);
+    map_cols_ = map_.getSize()(1);
+    map_half_x_ = config_.map_size_x * 0.5;
+    map_half_y_ = config_.map_size_y * 0.5;
+    map_inv_resolution_ = 1.0 / config_.resolution;
+
+    const std::size_t cell_count =
+        static_cast<std::size_t>(map_rows_) * static_cast<std::size_t>(map_cols_);
+    if (cell_accumulators_.size() != cell_count) {
+        cell_accumulators_.assign(cell_count, CellAccumulator{});
+        active_cell_indices_.clear();
+        cell_keep_counts_.assign(cell_count, 0);
+    }
+    if (smoothed_height_.size() != cell_count) {
+        smoothed_height_.assign(cell_count, kNaN);
+        smoothed_valid_.assign(cell_count, 0);
+    }
+}
+
+bool LidarBevBuilder::positionToCellIndex(double x, double y, int& row, int& col) const
+{
+    row = static_cast<int>(std::floor((map_half_x_ - x) * map_inv_resolution_));
+    col = static_cast<int>(std::floor((map_half_y_ - y) * map_inv_resolution_));
+    return row >= 0 && row < map_rows_ && col >= 0 && col < map_cols_;
+}
+
+float LidarBevBuilder::medianOfSmallArray(float* values, int count)
+{
+    if (count <= 0) {
+        return 0.0f;
+    }
+    const int median_index = count / 2;
+    std::nth_element(values, values + median_index, values + count);
+    return values[median_index];
 }
 
 void LidarBevBuilder::build(const std::vector<PointXYZRGBValid>& car_points,
@@ -96,12 +171,32 @@ void LidarBevBuilder::build(const std::vector<PointXYZRGBValid>& car_points,
     display_pose_ = Eigen::Isometry3d::Identity();
     display_pose_valid_ = true;
 
-    initializeMap(frame_id, center);
+    ensureMap(frame_id, center);
 
-    std::vector<PreparedPoint> prepared_points;
-    prepared_points.reserve(car_points.size());
+    prepared_points_buffer_.clear();
+    prepared_points_buffer_.reserve(car_points.size());
 
-    for (const auto& point : car_points) {
+    struct PreparedPointSlot {
+        bool valid = false;
+        PreparedPoint point;
+    };
+    std::vector<PreparedPointSlot> prepared_slots(car_points.size());
+
+    Eigen::Matrix3d odom_rotation = Eigen::Matrix3d::Identity();
+    Eigen::Vector3d odom_translation = Eigen::Vector3d::Zero();
+    if (use_odom) {
+        odom_rotation = odometry->pose.linear();
+        odom_translation = odometry->pose.translation();
+    }
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256)
+#endif
+    for (int i = 0; i < static_cast<int>(car_points.size()); ++i) {
+        const auto& point = car_points[static_cast<std::size_t>(i)];
+        PreparedPointSlot& slot = prepared_slots[static_cast<std::size_t>(i)];
+        slot.valid = false;
+
         if (!isFinitePoint(point)) {
             continue;
         }
@@ -119,7 +214,7 @@ void LidarBevBuilder::build(const std::vector<PointXYZRGBValid>& car_points,
 
         if (use_odom) {
             const Eigen::Vector3d point_odom =
-                odometry->pose * Eigen::Vector3d(point.x, point.y, point.z);
+                odom_rotation * Eigen::Vector3d(point.x, point.y, point.z) + odom_translation;
             prepared.x = point_odom.x();
             prepared.y = point_odom.y();
             prepared.z = point_odom.z();
@@ -129,13 +224,22 @@ void LidarBevBuilder::build(const std::vector<PointXYZRGBValid>& car_points,
             prepared.z = point.z;
         }
 
-        prepared_points.push_back(prepared);
+        slot.valid = true;
+        slot.point = prepared;
     }
 
-    const double ground_reference = estimateGroundReference(prepared_points);
+    for (const PreparedPointSlot& slot : prepared_slots) {
+        if (slot.valid) {
+            prepared_points_buffer_.push_back(slot.point);
+        }
+    }
+    std::vector<PreparedPoint>& prepared_points = prepared_points_buffer_;
 
     addFrameToHistory(capture_pose, capture_pose_valid, stamp_, prepared_points);
     pruneFrameHistoryCellPointLimit(current_pose, capture_pose_valid);
+    const double ground_reference =
+        estimateGroundReferenceFromHistory(current_pose, capture_pose_valid);
+    last_ground_reference_ = ground_reference;
     fillMapFromFrameHistory(current_pose, capture_pose_valid, ground_reference);
     computeDirectionalGradients();
 
@@ -173,9 +277,9 @@ void LidarBevBuilder::pruneFrameHistoryCellPointLimit(
     const Eigen::Isometry3d& current_pose,
     bool current_pose_valid)
 {
-    const int rows = map_.getSize()(0);
-    const int cols = map_.getSize()(1);
-    const std::size_t cell_count = static_cast<std::size_t>(rows * cols);
+    const int cols = map_cols_;
+    const std::size_t cell_count =
+        static_cast<std::size_t>(map_rows_) * static_cast<std::size_t>(cols);
     if (cell_keep_counts_.size() != cell_count) {
         cell_keep_counts_.assign(cell_count, 0);
     } else {
@@ -183,7 +287,11 @@ void LidarBevBuilder::pruneFrameHistoryCellPointLimit(
     }
 
     const bool limit_cell_points = config_.cell_max_points > 0;
-    const Eigen::Isometry3d current_pose_inverse = current_pose.inverse();
+    const Eigen::Matrix3d current_rotation = current_pose.linear();
+    const Eigen::Vector3d current_translation = current_pose.translation();
+    const Eigen::Matrix3d current_rotation_inverse = current_rotation.transpose();
+    const Eigen::Vector3d current_translation_inverse =
+        -current_rotation_inverse * current_translation;
 
     for (auto frame_it = frame_history_.rbegin(); frame_it != frame_history_.rend(); ++frame_it) {
         FrameObservation& frame = *frame_it;
@@ -192,29 +300,39 @@ void LidarBevBuilder::pruneFrameHistoryCellPointLimit(
             continue;
         }
 
-        Eigen::Isometry3d frame_to_current = Eigen::Isometry3d::Identity();
+        Eigen::Matrix3d frame_to_current_rotation = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d frame_to_current_translation = Eigen::Vector3d::Zero();
         if (current_pose_valid && frame.pose_valid) {
-            frame_to_current = current_pose_inverse * frame.pose;
+            const Eigen::Matrix3d frame_rotation = frame.pose.linear();
+            const Eigen::Vector3d frame_translation = frame.pose.translation();
+            frame_to_current_rotation = current_rotation_inverse * frame_rotation;
+            frame_to_current_translation =
+                current_rotation_inverse * frame_translation + current_translation_inverse;
         }
 
-        std::vector<StoredPoint> kept_reversed;
-        kept_reversed.reserve(frame.points.size());
+        prune_kept_buffer_.clear();
+        prune_kept_buffer_.reserve(frame.points.size());
 
         for (auto point_it = frame.points.rbegin(); point_it != frame.points.rend(); ++point_it) {
-            Eigen::Vector3d local_point(point_it->x, point_it->y, point_it->z);
-            local_point = frame_to_current * local_point;
+            const Eigen::Vector3d local_point =
+                frame_to_current_rotation *
+                    Eigen::Vector3d(point_it->x, point_it->y, point_it->z) +
+                frame_to_current_translation;
 
-            if (!std::isfinite(local_point.x()) || !std::isfinite(local_point.y())) {
+            const double local_x = local_point.x();
+            const double local_y = local_point.y();
+            if (!std::isfinite(local_x) || !std::isfinite(local_y)) {
                 continue;
             }
 
-            grid_map::Index index;
-            if (!map_.getIndex(grid_map::Position(local_point.x(), local_point.y()), index)) {
+            int row = 0;
+            int col = 0;
+            if (!positionToCellIndex(local_x, local_y, row, col)) {
                 continue;
             }
 
             if (limit_cell_points) {
-                const std::size_t linear_index = gridIndex(index(0), index(1), cols);
+                const std::size_t linear_index = gridIndex(row, col, cols);
                 int& kept_count = cell_keep_counts_[linear_index];
                 if (kept_count >= config_.cell_max_points) {
                     continue;
@@ -222,10 +340,10 @@ void LidarBevBuilder::pruneFrameHistoryCellPointLimit(
                 ++kept_count;
             }
 
-            kept_reversed.push_back(*point_it);
+            prune_kept_buffer_.push_back(*point_it);
         }
 
-        frame.points.assign(kept_reversed.rbegin(), kept_reversed.rend());
+        frame.points.assign(prune_kept_buffer_.rbegin(), prune_kept_buffer_.rend());
     }
 
     frame_history_.erase(
@@ -245,21 +363,14 @@ void LidarBevBuilder::fillMapFromFrameHistory(
     auto& h_rel_layer = map_["H_rel_surf"];
     auto& mask_layer = map_["M_L"];
 
-    const int rows = map_.getSize()(0);
-    const int cols = map_.getSize()(1);
-    const std::size_t cell_count = static_cast<std::size_t>(rows * cols);
-    if (cell_accumulators_.size() != cell_count) {
-        cell_accumulators_.clear();
-        cell_accumulators_.resize(cell_count);
-        active_cell_indices_.clear();
-    } else {
-        for (const std::size_t index : active_cell_indices_) {
-            CellAccumulator& cell = cell_accumulators_[index];
-            cell.count = 0;
-            cell.top_heights.clear();
-        }
-        active_cell_indices_.clear();
+    const int cols = map_cols_;
+
+    for (const std::size_t index : active_cell_indices_) {
+        CellAccumulator& cell = cell_accumulators_[index];
+        cell.count = 0;
+        cell.top_heights.clear();
     }
+    active_cell_indices_.clear();
 
     const int max_top_height_count = config_.cell_max_points > 0
         ? std::max(1,
@@ -267,35 +378,63 @@ void LidarBevBuilder::fillMapFromFrameHistory(
                        std::ceil(kSurfaceTopHeightFraction *
                                  static_cast<double>(config_.cell_max_points))))
         : 0;
-    const Eigen::Isometry3d current_pose_inverse = current_pose.inverse();
+    const Eigen::Matrix3d current_rotation = current_pose.linear();
+    const Eigen::Vector3d current_translation = current_pose.translation();
+    const Eigen::Matrix3d current_rotation_inverse = current_rotation.transpose();
+    const Eigen::Vector3d current_translation_inverse =
+        -current_rotation_inverse * current_translation;
 
     for (const auto& frame : frame_history_) {
         if (current_pose_valid != frame.pose_valid) {
             continue;
         }
 
-        Eigen::Isometry3d frame_to_current = Eigen::Isometry3d::Identity();
+        Eigen::Matrix3d frame_to_current_rotation = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d frame_to_current_translation = Eigen::Vector3d::Zero();
         if (current_pose_valid && frame.pose_valid) {
-            frame_to_current = current_pose_inverse * frame.pose;
+            const Eigen::Matrix3d frame_rotation = frame.pose.linear();
+            const Eigen::Vector3d frame_translation = frame.pose.translation();
+            frame_to_current_rotation = current_rotation_inverse * frame_rotation;
+            frame_to_current_translation =
+                current_rotation_inverse * frame_translation + current_translation_inverse;
         }
 
-        for (const auto& point : frame.points) {
-            Eigen::Vector3d local_point(point.x, point.y, point.z);
-            local_point = frame_to_current * local_point;
+        std::vector<BevFrameSample> frame_samples(frame.points.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 256)
+#endif
+        for (int point_index = 0; point_index < static_cast<int>(frame.points.size()); ++point_index) {
+            const auto& point = frame.points[static_cast<std::size_t>(point_index)];
+            BevFrameSample& sample = frame_samples[static_cast<std::size_t>(point_index)];
+            sample.valid = false;
 
-            grid_map::Index index;
-            if (!map_.getIndex(grid_map::Position(local_point.x(), local_point.y()), index)) {
+            const Eigen::Vector3d local_point =
+                frame_to_current_rotation *
+                    Eigen::Vector3d(point.x, point.y, point.z) +
+                frame_to_current_translation;
+
+            int row = 0;
+            int col = 0;
+            if (!positionToCellIndex(local_point.x(), local_point.y(), row, col)) {
                 continue;
             }
 
-            const std::size_t linear_index = gridIndex(index(0), index(1), cols);
-            CellAccumulator& cell = cell_accumulators_[linear_index];
-            if (cell.count == 0) {
-                active_cell_indices_.push_back(linear_index);
+            sample.valid = true;
+            sample.linear_index = gridIndex(row, col, cols);
+            sample.z = static_cast<float>(local_point.z());
+        }
+
+        for (const BevFrameSample& sample : frame_samples) {
+            if (!sample.valid) {
+                continue;
             }
-            const float z = static_cast<float>(local_point.z());
+
+            CellAccumulator& cell = cell_accumulators_[sample.linear_index];
+            if (cell.count == 0) {
+                active_cell_indices_.push_back(sample.linear_index);
+            }
             ++cell.count;
-            addTopHeight(cell, z, max_top_height_count);
+            addTopHeight(cell, sample.z, max_top_height_count);
         }
     }
 
@@ -363,22 +502,26 @@ void LidarBevBuilder::computeDirectionalGradients()
     longitudinal_gradient_layer.setConstant(kNaN);
     lateral_gradient_layer.setConstant(kNaN);
 
-    const int rows = map_.getSize()(0);
-    const int cols = map_.getSize()(1);
-    const std::size_t cell_count = static_cast<std::size_t>(rows * cols);
+    const int rows = map_rows_;
+    const int cols = map_cols_;
 
-    std::vector<float> smoothed_height(cell_count, kNaN);
-    std::vector<uint8_t> smoothed_valid(cell_count, 0);
+    std::fill(smoothed_height_.begin(), smoothed_height_.end(), kNaN);
+    std::memset(smoothed_valid_.data(), 0, smoothed_valid_.size());
 
     // Smooth H_rel_surf with a 3x3 median before Sobel gradients.
-    for (const std::size_t index : active_cell_indices_) {
+    const int active_count = static_cast<int>(active_cell_indices_.size());
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 64)
+#endif
+    for (int active_i = 0; active_i < active_count; ++active_i) {
+        const std::size_t index = active_cell_indices_[static_cast<std::size_t>(active_i)];
         const int row = static_cast<int>(index / static_cast<std::size_t>(cols));
         const int col = static_cast<int>(index % static_cast<std::size_t>(cols));
         if (mask_layer(row, col) <= 0.5f || !std::isfinite(h_rel_layer(row, col))) {
             continue;
         }
 
-        std::array<float, 9> values;
+        float values[9];
         int value_count = 0;
         for (int dr = -1; dr <= 1; ++dr) {
             for (int dc = -1; dc <= 1; ++dc) {
@@ -392,8 +535,7 @@ void LidarBevBuilder::computeDirectionalGradients()
                     !std::isfinite(h_rel_layer(neighbor_row, neighbor_col))) {
                     continue;
                 }
-                values[static_cast<std::size_t>(value_count)] =
-                    h_rel_layer(neighbor_row, neighbor_col);
+                values[value_count] = h_rel_layer(neighbor_row, neighbor_col);
                 ++value_count;
             }
         }
@@ -402,10 +544,8 @@ void LidarBevBuilder::computeDirectionalGradients()
             continue;
         }
 
-        std::sort(values.begin(), values.begin() + value_count);
-        const float median_height = values[static_cast<std::size_t>(value_count / 2)];
-        smoothed_height[index] = median_height;
-        smoothed_valid[index] = 1;
+        smoothed_height_[index] = medianOfSmallArray(values, value_count);
+        smoothed_valid_[index] = 1;
     }
 
     static const int sobel_x[3][3] = {
@@ -462,14 +602,18 @@ void LidarBevBuilder::computeDirectionalGradients()
         }
     }
 
-    for (const std::size_t index : active_cell_indices_) {
-        if (!smoothed_valid[index]) {
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 64)
+#endif
+    for (int active_i = 0; active_i < active_count; ++active_i) {
+        const std::size_t index = active_cell_indices_[static_cast<std::size_t>(active_i)];
+        if (!smoothed_valid_[index]) {
             continue;
         }
 
         const int row = static_cast<int>(index / static_cast<std::size_t>(cols));
         const int col = static_cast<int>(index % static_cast<std::size_t>(cols));
-        const float center_height = smoothed_height[index];
+        const float center_height = smoothed_height_[index];
         int valid_neighbor_count = 0;
         double grad_index1 = 0.0;
         double grad_index0 = 0.0;
@@ -484,8 +628,8 @@ void LidarBevBuilder::computeDirectionalGradients()
                     neighbor_col >= 0 && neighbor_col < cols) {
                     const std::size_t neighbor_index =
                         gridIndex(neighbor_row, neighbor_col, cols);
-                    if (smoothed_valid[neighbor_index]) {
-                        value = smoothed_height[neighbor_index];
+                    if (smoothed_valid_[neighbor_index]) {
+                        value = smoothed_height_[neighbor_index];
                         ++valid_neighbor_count;
                     }
                 }
@@ -531,70 +675,102 @@ void LidarBevBuilder::showDebugWindows() const
         return;
     }
 
-    static const std::array<std::string, 4> window_names = {
-        "BEV Relative Surface Height Map (H_rel_surf)",
-        "BEV Valid Observation Mask (M_L)",
-        "BEV Longitudinal Height Gradient Map (G_long_L)",
-        "BEV Lateral Height Gradient Map (G_lat_L)"
-    };
+    static const std::string layers_window_name = "BEV H_rel | BEV G_long | BEV G_lat";
+    static const std::string mask_window_name = "BEV M_L";
     static bool windows_created = false;
     if (!windows_created) {
-        for (const auto& window_name : window_names) {
-            cv::namedWindow(window_name, cv::WINDOW_NORMAL);
-        }
+        int flags = cv::WINDOW_NORMAL | cv::WINDOW_KEEPRATIO;
+        cv::namedWindow(layers_window_name, flags);
+        cv::namedWindow(mask_window_name, flags);
+        cv::resizeWindow(layers_window_name, 1500, 500);
+        cv::resizeWindow(mask_window_name, 500, 500);
         windows_created = true;
     }
 
-    cv::imshow(window_names[0], renderHeightLayer("H_rel_surf"));
-    cv::imshow(window_names[1], renderBinaryLayer("M_L"));
-    cv::imshow(window_names[2], renderHeightLayer("G_long_L"));
-    cv::imshow(window_names[3], renderHeightLayer("G_lat_L"));
+    cv::imshow(layers_window_name, renderStackedDebugLayers());
+    cv::imshow(mask_window_name, renderBinaryLayer("M_L", false));
     cv::waitKey(1);
 }
 
-cv::Mat LidarBevBuilder::renderHeightLayer(const std::string& layer_name) const
+cv::Mat LidarBevBuilder::renderStackedDebugLayers() const
 {
-    const int rows = map_.getSize()(0);
-    const int cols = map_.getSize()(1);
+    const std::pair<double, double> height_range =
+        getRobustLayerRange("H_rel_surf", 0.0, 1.0);
+    const std::pair<double, double> longitudinal_range =
+        getRobustLayerRange("G_long_L", 0.0, 1.0);
+    const std::pair<double, double> lateral_range =
+        getRobustLayerRange("G_lat_L", 0.0, 1.0);
+
+    cv::Mat height_image =
+        renderColorizedLayer("H_rel_surf", height_range.first, height_range.second);
+    cv::Mat longitudinal_image =
+        renderColorizedLayer("G_long_L", longitudinal_range.first, longitudinal_range.second);
+    cv::Mat lateral_image =
+        renderColorizedLayer("G_lat_L", lateral_range.first, lateral_range.second);
+
+    if (!height_image.empty()) {
+        drawGroundReferenceRegion(height_image);
+    }
+
+    cv::Mat combined;
+    if (height_image.empty() || longitudinal_image.empty() || lateral_image.empty() ||
+        height_image.rows != longitudinal_image.rows ||
+        height_image.rows != lateral_image.rows) {
+        return height_image;
+    }
+    cv::hconcat(height_image, longitudinal_image, combined);
+    cv::hconcat(combined, lateral_image, combined);
+    return combined;
+}
+
+cv::Mat LidarBevBuilder::renderColorizedLayer(const std::string& layer_name,
+                                              double min_value,
+                                              double max_value) const
+{
+    const int rows = map_rows_;
+    const int cols = map_cols_;
     cv::Mat image(rows, cols, CV_8UC3, cv::Scalar(0, 0, 0));
 
-    if (!map_.exists(layer_name) || !map_.exists("M_L")) {
+    if (!map_.exists(layer_name) || !map_.exists("M_L") || !map_.exists("H_rel_surf")) {
         return image;
     }
 
     const auto& layer = map_[layer_name];
-    const auto& mask = map_["M_L"];
-    const std::pair<double, double> range = getRobustLayerRange(layer_name, 0.0, 1.0);
-    const double min_value = range.first;
-    const double max_value = range.second;
-    const double inv_range = max_value > min_value ? 1.0 / (max_value - min_value) : 1.0;
+    const double inv_range =
+        max_value > min_value ? 1.0 / (max_value - min_value) : 1.0;
 
-    for (int image_row = 0; image_row < rows; ++image_row) {
-        for (int image_col = 0; image_col < cols; ++image_col) {
-            grid_map::Index index;
-            if (!getVehicleFrameIndex(image_row, image_col, index)) {
-                continue;
-            }
-
-            const float value = layer(index(0), index(1));
-            if (mask(index(0), index(1)) <= 0.5f || !std::isfinite(value)) {
-                continue;
-            }
-
-            const double normalized =
-                (static_cast<double>(value) - min_value) * inv_range;
-            image.at<cv::Vec3b>(image_row, image_col) = viridisColor(normalized);
+    for (const std::size_t linear_index : active_cell_indices_) {
+        const int row = static_cast<int>(linear_index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(linear_index % static_cast<std::size_t>(cols));
+        const grid_map::Index index(row, col);
+        if (!isDebugPixelValid(index)) {
+            continue;
         }
+
+        const float value = layer(index(0), index(1));
+        if (!std::isfinite(value)) {
+            continue;
+        }
+
+        const double normalized =
+            (static_cast<double>(value) - min_value) * inv_range;
+        image.at<cv::Vec3b>(row, col) = viridisColor(normalized);
     }
 
-    drawCenterMark(image);
     return image;
 }
 
-cv::Mat LidarBevBuilder::renderBinaryLayer(const std::string& layer_name) const
+cv::Mat LidarBevBuilder::renderHeightLayer(const std::string& layer_name) const
 {
-    const int rows = map_.getSize()(0);
-    const int cols = map_.getSize()(1);
+    const std::pair<double, double> range = getRobustLayerRange(layer_name, 0.0, 1.0);
+    return renderColorizedLayer(layer_name, range.first, range.second);
+}
+
+cv::Mat LidarBevBuilder::renderBinaryLayer(const std::string& layer_name,
+                                            bool draw_center_mark) const
+{
+    const int rows = map_rows_;
+    const int cols = map_cols_;
     cv::Mat image(rows, cols, CV_8UC3, cv::Scalar(0, 0, 0));
 
     if (!map_.exists(layer_name)) {
@@ -602,21 +778,31 @@ cv::Mat LidarBevBuilder::renderBinaryLayer(const std::string& layer_name) const
     }
 
     const auto& layer = map_[layer_name];
-    for (int image_row = 0; image_row < rows; ++image_row) {
-        for (int image_col = 0; image_col < cols; ++image_col) {
-            grid_map::Index index;
-            if (!getVehicleFrameIndex(image_row, image_col, index)) {
-                continue;
-            }
-
-            if (layer(index(0), index(1)) > 0.5f) {
-                image.at<cv::Vec3b>(image_row, image_col) = cv::Vec3b(255, 255, 255);
-            }
+    for (const std::size_t linear_index : active_cell_indices_) {
+        const int row = static_cast<int>(linear_index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(linear_index % static_cast<std::size_t>(cols));
+        if (layer(row, col) > 0.5f) {
+            image.at<cv::Vec3b>(row, col) = cv::Vec3b(255, 255, 255);
         }
     }
 
-    drawCenterMark(image);
+    if (draw_center_mark) {
+        drawCenterMark(image);
+    }
+    drawGroundReferenceRegion(image);
     return image;
+}
+
+bool LidarBevBuilder::isDebugPixelValid(const grid_map::Index& index) const
+{
+    if (!map_.exists("M_L") || !map_.exists("H_rel_surf")) {
+        return false;
+    }
+
+    const auto& mask = map_["M_L"];
+    const auto& height = map_["H_rel_surf"];
+    return mask(index(0), index(1)) > 0.5f &&
+           std::isfinite(height(index(0), index(1)));
 }
 
 cv::Vec3b LidarBevBuilder::viridisColor(double normalized_value) const
@@ -652,20 +838,23 @@ std::pair<double, double> LidarBevBuilder::getRobustLayerRange(
     }
 
     const auto& layer = map_[layer_name];
-    const auto& mask = map_["M_L"];
-    const int rows = map_.getSize()(0);
-    const int cols = map_.getSize()(1);
+    const int cols = map_cols_;
     std::vector<float> values;
-    values.reserve(static_cast<std::size_t>(rows * cols));
+    values.reserve(active_cell_indices_.size());
 
-    for (int row = 0; row < rows; ++row) {
-        for (int col = 0; col < cols; ++col) {
-            const float value = layer(row, col);
-            if (mask(row, col) <= 0.5f || !std::isfinite(value)) {
-                continue;
-            }
-            values.push_back(value);
+    for (const std::size_t linear_index : active_cell_indices_) {
+        const int row = static_cast<int>(linear_index / static_cast<std::size_t>(cols));
+        const int col = static_cast<int>(linear_index % static_cast<std::size_t>(cols));
+        const grid_map::Index index(row, col);
+        if (!isDebugPixelValid(index)) {
+            continue;
         }
+
+        const float value = layer(index(0), index(1));
+        if (!std::isfinite(value)) {
+            continue;
+        }
+        values.push_back(value);
     }
 
     if (values.size() < 2) {
@@ -716,14 +905,132 @@ bool LidarBevBuilder::getVehicleFrameIndex(int image_row,
     return map_.getIndex(grid_map::Position(map_point.x(), map_point.y()), index);
 }
 
+void LidarBevBuilder::vehicleBodyToImagePixel(double x, double y, double& row, double& col) const
+{
+    row = (map_half_x_ - x) * map_inv_resolution_ - 0.5;
+    col = (map_half_y_ - y) * map_inv_resolution_ - 0.5;
+}
+
+void LidarBevBuilder::drawGroundReferenceRegion(cv::Mat& image) const
+{
+    if (image.empty() || map_rows_ <= 0 || map_cols_ <= 0) {
+        return;
+    }
+    if (image.rows != map_rows_ || image.cols != map_cols_ || image.type() != CV_8UC3) {
+        return;
+    }
+
+    double origin_row = 0.0;
+    double origin_col = 0.0;
+    vehicleBodyToImagePixel(0.0, 0.0, origin_row, origin_col);
+    const cv::Point origin(static_cast<int>(std::round(origin_col)),
+                           static_cast<int>(std::round(origin_row)));
+
+    const int inner_px =
+        std::max(1, static_cast<int>(std::round(config_.near_inner_radius * map_inv_resolution_)));
+    const int outer_px = std::max(
+        inner_px + 1,
+        static_cast<int>(std::round(config_.near_outer_radius * map_inv_resolution_)));
+
+    const double half_angle_rad = config_.ground_front_half_angle_deg * M_PI / 180.0;
+    const double inner_r = config_.near_inner_radius;
+    const double outer_r = config_.near_outer_radius;
+
+    cv::Mat overlay = image.clone();
+
+    constexpr int kArcSteps = 36;
+    std::vector<cv::Point> sector_annulus;
+    sector_annulus.reserve(static_cast<std::size_t>(kArcSteps) * 2 + 2);
+    for (int i = 0; i <= kArcSteps; ++i) {
+        const double angle =
+            -half_angle_rad +
+            (2.0 * half_angle_rad) * static_cast<double>(i) / static_cast<double>(kArcSteps);
+        double row = 0.0;
+        double col = 0.0;
+        vehicleBodyToImagePixel(inner_r * std::cos(angle), inner_r * std::sin(angle), row, col);
+        sector_annulus.emplace_back(static_cast<int>(std::round(col)), static_cast<int>(std::round(row)));
+    }
+    for (int i = kArcSteps; i >= 0; --i) {
+        const double angle =
+            -half_angle_rad +
+            (2.0 * half_angle_rad) * static_cast<double>(i) / static_cast<double>(kArcSteps);
+        double row = 0.0;
+        double col = 0.0;
+        vehicleBodyToImagePixel(outer_r * std::cos(angle), outer_r * std::sin(angle), row, col);
+        sector_annulus.emplace_back(static_cast<int>(std::round(col)), static_cast<int>(std::round(row)));
+    }
+    if (sector_annulus.size() >= 3) {
+        const std::vector<std::vector<cv::Point>> contours{sector_annulus};
+        cv::fillPoly(overlay, contours, cv::Scalar(255, 200, 0));
+    }
+
+    cv::Mat blended;
+    cv::addWeighted(overlay, 0.30, image, 0.70, 0.0, blended);
+    blended.copyTo(image);
+
+    const cv::Scalar ring_color(0, 255, 255);
+    const cv::Scalar sector_color(255, 0, 255);
+    cv::circle(image, origin, inner_px, ring_color, 1, cv::LINE_AA);
+    cv::circle(image, origin, outer_px, ring_color, 1, cv::LINE_AA);
+
+    for (const double angle : {-half_angle_rad, half_angle_rad}) {
+        double row = 0.0;
+        double col = 0.0;
+        vehicleBodyToImagePixel(outer_r * std::cos(angle), outer_r * std::sin(angle), row, col);
+        cv::line(image,
+                 origin,
+                 cv::Point(static_cast<int>(std::round(col)), static_cast<int>(std::round(row))),
+                 sector_color,
+                 1,
+                 cv::LINE_AA);
+    }
+
+    if (config_.ground_require_forward) {
+        double row_neg = 0.0;
+        double col_neg = 0.0;
+        double row_pos = 0.0;
+        double col_pos = 0.0;
+        vehicleBodyToImagePixel(0.0, -outer_r, row_neg, col_neg);
+        vehicleBodyToImagePixel(0.0, outer_r, row_pos, col_pos);
+        cv::line(image,
+                 cv::Point(static_cast<int>(std::round(col_neg)),
+                           static_cast<int>(std::round(row_neg))),
+                 cv::Point(static_cast<int>(std::round(col_pos)),
+                           static_cast<int>(std::round(row_pos))),
+                 cv::Scalar(180, 180, 180),
+                 1,
+                 cv::LINE_AA);
+    }
+
+    cv::putText(image,
+                "ground ROI",
+                cv::Point(8, 18),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.45,
+                cv::Scalar(255, 200, 0),
+                1,
+                cv::LINE_AA);
+    cv::putText(image,
+                "ring+sector+z",
+                cv::Point(8, 36),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.45,
+                ring_color,
+                1,
+                cv::LINE_AA);
+}
+
 void LidarBevBuilder::drawCenterMark(cv::Mat& image) const
 {
     if (image.empty()) {
         return;
     }
 
-    const int center_col = image.cols / 2;
-    const int center_row = image.rows / 2;
+    double origin_row = 0.0;
+    double origin_col = 0.0;
+    vehicleBodyToImagePixel(0.0, 0.0, origin_row, origin_col);
+    const int center_col = static_cast<int>(std::round(origin_col));
+    const int center_row = static_cast<int>(std::round(origin_row));
     const int marker = std::max(4, static_cast<int>(1.0 / config_.resolution));
     cv::line(image,
              cv::Point(center_col - marker, center_row),
@@ -737,95 +1044,138 @@ void LidarBevBuilder::drawCenterMark(cv::Mat& image) const
              1);
 }
 
-double LidarBevBuilder::estimateGroundReference(
-    const std::vector<PreparedPoint>& points) const
+bool LidarBevBuilder::isGroundRoiPlanarPoint(double x, double y) const
 {
-    constexpr double kFrontHalfAngleRad = M_PI / 12.0;
-    constexpr std::size_t kReferencePointCount = 20;
-
-    std::vector<std::pair<double, double>> front_candidates;
-    std::vector<std::pair<double, double>> fallback_candidates;
-    front_candidates.reserve(points.size());
-    fallback_candidates.reserve(points.size());
-
-    for (const auto& point : points) {
-        if (!std::isfinite(point.z)) {
-            continue;
-        }
-
-        const double distance_sq = point.car_x * point.car_x + point.car_y * point.car_y;
-        const double distance = std::sqrt(distance_sq);
-        if (distance < config_.near_inner_radius || distance > config_.near_outer_radius) {
-            continue;
-        }
-        if (point.car_z < config_.ground_candidate_min_z ||
-            point.car_z > config_.ground_candidate_max_z) {
-            continue;
-        }
-
-        fallback_candidates.emplace_back(distance_sq, point.car_z);
-
-        if (point.car_x <= 0.0) {
-            continue;
-        }
-
-        const double angle = std::atan2(point.car_y, point.car_x);
-        if (std::abs(angle) > kFrontHalfAngleRad) {
-            continue;
-        }
-
-        front_candidates.emplace_back(distance_sq, point.car_z);
+    if (!std::isfinite(x) || !std::isfinite(y)) {
+        return false;
     }
 
-    auto averageNearestHeights =
-        [kReferencePointCount](std::vector<std::pair<double, double>>& candidates) -> double {
-            if (candidates.empty()) {
-                return std::numeric_limits<double>::quiet_NaN();
-            }
-
-            const std::size_t used_count =
-                std::min(kReferencePointCount, candidates.size());
-            std::nth_element(candidates.begin(),
-                             candidates.begin() + static_cast<std::ptrdiff_t>(used_count - 1),
-                             candidates.end(),
-                             [](const auto& lhs, const auto& rhs) {
-                                 return lhs.first < rhs.first;
-                             });
-
-            double z_sum = 0.0;
-            for (std::size_t i = 0; i < used_count; ++i) {
-                z_sum += candidates[i].second;
-            }
-            return z_sum / static_cast<double>(used_count);
-        };
-
-    const double front_reference =
-        front_candidates.size() >= static_cast<std::size_t>(config_.ground_min_points)
-            ? averageNearestHeights(front_candidates)
-            : std::numeric_limits<double>::quiet_NaN();
-    if (std::isfinite(front_reference)) {
-        return front_reference;
+    const double distance_sq = x * x + y * y;
+    const double inner_sq =
+        config_.near_inner_radius * config_.near_inner_radius;
+    const double outer_sq =
+        config_.near_outer_radius * config_.near_outer_radius;
+    if (distance_sq < inner_sq || distance_sq > outer_sq) {
+        return false;
     }
 
-    const double fallback_reference =
-        fallback_candidates.size() >= static_cast<std::size_t>(config_.ground_min_points)
-            ? averageNearestHeights(fallback_candidates)
-            : std::numeric_limits<double>::quiet_NaN();
-    if (std::isfinite(fallback_reference)) {
-        return fallback_reference;
+    if (config_.ground_require_forward && x <= 0.0) {
+        return false;
     }
 
-    return 0.0;
+    const double front_half_angle_rad =
+        config_.ground_front_half_angle_deg * M_PI / 180.0;
+    const double angle = std::atan2(y, x);
+    return std::abs(angle) <= front_half_angle_rad;
 }
 
-double LidarBevBuilder::meanTopHeightFraction(std::vector<float> values,
+bool LidarBevBuilder::isGroundRoiBodyPoint(double x, double y, double z) const
+{
+    if (!isGroundRoiPlanarPoint(x, y)) {
+        return false;
+    }
+
+    if (!std::isfinite(z)) {
+        return false;
+    }
+
+    return z >= config_.ground_candidate_min_z && z <= config_.ground_candidate_max_z;
+}
+
+double LidarBevBuilder::estimateGroundReferenceFromHistory(
+    const Eigen::Isometry3d& current_pose,
+    bool current_pose_valid) const
+{
+    const std::size_t reference_point_count =
+        static_cast<std::size_t>(config_.ground_min_points);
+    constexpr std::size_t kMaxGroundHistoryFrames = 10;
+
+    std::vector<std::pair<double, double>> ground_candidates;
+    ground_candidates.reserve(4096);
+    int planar_count = 0;
+
+    const Eigen::Matrix3d current_rotation = current_pose.linear();
+    const Eigen::Vector3d current_translation = current_pose.translation();
+    const Eigen::Matrix3d current_rotation_inverse = current_rotation.transpose();
+    const Eigen::Vector3d current_translation_inverse =
+        -current_rotation_inverse * current_translation;
+
+    std::size_t frames_used = 0;
+    for (auto frame_it = frame_history_.rbegin();
+         frame_it != frame_history_.rend() && frames_used < kMaxGroundHistoryFrames;
+         ++frame_it, ++frames_used) {
+        const FrameObservation& frame = *frame_it;
+        if (current_pose_valid != frame.pose_valid) {
+            continue;
+        }
+
+        Eigen::Matrix3d frame_to_current_rotation = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d frame_to_current_translation = Eigen::Vector3d::Zero();
+        if (current_pose_valid && frame.pose_valid) {
+            const Eigen::Matrix3d frame_rotation = frame.pose.linear();
+            const Eigen::Vector3d frame_translation = frame.pose.translation();
+            frame_to_current_rotation = current_rotation_inverse * frame_rotation;
+            frame_to_current_translation =
+                current_rotation_inverse * frame_translation + current_translation_inverse;
+        }
+
+        for (const auto& point : frame.points) {
+            const Eigen::Vector3d local_point =
+                frame_to_current_rotation *
+                    Eigen::Vector3d(point.x, point.y, point.z) +
+                frame_to_current_translation;
+
+            const double local_x = local_point.x();
+            const double local_y = local_point.y();
+            const double local_z = local_point.z();
+            if (isGroundRoiPlanarPoint(local_x, local_y)) {
+                ++planar_count;
+            }
+            if (!isGroundRoiBodyPoint(local_x, local_y, local_z)) {
+                continue;
+            }
+
+            const double distance_sq = local_x * local_x + local_y * local_y;
+            ground_candidates.emplace_back(distance_sq, local_z);
+        }
+    }
+
+    last_ground_roi_planar_count_ = planar_count;
+    last_ground_roi_candidate_count_ = static_cast<int>(ground_candidates.size());
+
+    if (ground_candidates.size() >= static_cast<std::size_t>(config_.ground_min_points)) {
+        const std::size_t used_count =
+            std::min(reference_point_count, ground_candidates.size());
+        std::nth_element(ground_candidates.begin(),
+                         ground_candidates.begin() +
+                             static_cast<std::ptrdiff_t>(used_count - 1),
+                         ground_candidates.end(),
+                         [](const auto& lhs, const auto& rhs) {
+                             return lhs.first < rhs.first;
+                         });
+
+        double z_sum = 0.0;
+        for (std::size_t i = 0; i < used_count; ++i) {
+            z_sum += ground_candidates[i].second;
+        }
+        return z_sum / static_cast<double>(used_count);
+    }
+
+    return config_.ground_failure_fallback_z;
+}
+
+double LidarBevBuilder::meanTopHeightFraction(const std::vector<float>& values,
                                               double top_fraction,
                                               int total_count) const
 {
-    values.erase(std::remove_if(values.begin(), values.end(),
-                                [](float value) { return !std::isfinite(value); }),
-                 values.end());
-    if (values.empty()) {
+    height_sort_buffer_.clear();
+    height_sort_buffer_.reserve(values.size());
+    for (float value : values) {
+        if (std::isfinite(value)) {
+            height_sort_buffer_.push_back(value);
+        }
+    }
+    if (height_sort_buffer_.empty()) {
         return 0.0;
     }
 
@@ -839,45 +1189,90 @@ double LidarBevBuilder::meanTopHeightFraction(std::vector<float> values,
         1,
         static_cast<std::size_t>(
             std::ceil(top_fraction * static_cast<double>(bounded_count))));
-    const std::size_t used_count = std::min(requested_count, values.size());
+    const std::size_t used_count =
+        std::min(requested_count, height_sort_buffer_.size());
 
-    if (used_count < values.size()) {
-        std::nth_element(values.begin(),
-                         values.begin() + static_cast<std::ptrdiff_t>(used_count - 1),
-                         values.end(),
+    if (used_count < height_sort_buffer_.size()) {
+        std::nth_element(height_sort_buffer_.begin(),
+                         height_sort_buffer_.begin() +
+                             static_cast<std::ptrdiff_t>(used_count - 1),
+                         height_sort_buffer_.end(),
                          std::greater<float>());
     }
 
     double sum = 0.0;
     for (std::size_t i = 0; i < used_count; ++i) {
-        sum += static_cast<double>(values[i]);
+        sum += static_cast<double>(height_sort_buffer_[i]);
     }
     return sum / static_cast<double>(used_count);
 }
 
-double LidarBevBuilder::percentile(std::vector<float> values, double quantile) const
+double LidarBevBuilder::percentile(const std::vector<float>& values, double quantile) const
 {
     if (values.empty()) {
         return 0.0;
     }
 
-    values.erase(std::remove_if(values.begin(), values.end(),
-                                [](float value) { return !std::isfinite(value); }),
-                 values.end());
-    if (values.empty()) {
+    height_sort_buffer_.clear();
+    height_sort_buffer_.reserve(values.size());
+    for (float value : values) {
+        if (std::isfinite(value)) {
+            height_sort_buffer_.push_back(value);
+        }
+    }
+    if (height_sort_buffer_.empty()) {
         return 0.0;
     }
 
     quantile = std::max(0.0, std::min(1.0, quantile));
     const std::size_t index = static_cast<std::size_t>(
-        std::floor(quantile * static_cast<double>(values.size() - 1)));
-    std::nth_element(values.begin(), values.begin() + index, values.end());
-    return values[index];
+        std::floor(quantile * static_cast<double>(height_sort_buffer_.size() - 1)));
+    std::nth_element(height_sort_buffer_.begin(),
+                     height_sort_buffer_.begin() + static_cast<std::ptrdiff_t>(index),
+                     height_sort_buffer_.end());
+    return height_sort_buffer_[index];
 }
 
 bool LidarBevBuilder::isFinitePoint(const PointXYZRGBValid& point) const
 {
     return isFinite(point.x) && isFinite(point.y) && isFinite(point.z);
+}
+
+double LidarBevBuilder::getGroundReference() const
+{
+    return last_ground_reference_;
+}
+
+int LidarBevBuilder::getGroundRoiCandidateCount() const
+{
+    return last_ground_roi_candidate_count_;
+}
+
+int LidarBevBuilder::getGroundRoiPlanarCount() const
+{
+    return last_ground_roi_planar_count_;
+}
+
+double LidarBevBuilder::getCenterRelativeHeight() const
+{
+    if (!map_.exists("H_rel_surf") || !map_.exists("M_L")) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    grid_map::Index center_index;
+    if (!map_.getIndex(grid_map::Position(0.0, 0.0), center_index)) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const auto& mask = map_["M_L"];
+    const auto& h_rel = map_["H_rel_surf"];
+    if (mask(center_index(0), center_index(1)) <= 0.5f) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const float value = h_rel(center_index(0), center_index(1));
+    return std::isfinite(value) ? static_cast<double>(value)
+                                : std::numeric_limits<double>::quiet_NaN();
 }
 
 void LidarBevBuilder::publish(const ros::Publisher& publisher) const

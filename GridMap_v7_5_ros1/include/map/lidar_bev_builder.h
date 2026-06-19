@@ -46,6 +46,9 @@ public:
         double ground_ransac_distance = 0.18;
         double ground_max_plane_tilt_deg = 25.0;
         double ground_fallback_quantile = 0.35;
+        double ground_front_half_angle_deg = 7.5;
+        bool ground_require_forward = true;
+        double ground_failure_fallback_z = 0.0;
         int ground_min_points = 30;
 
         double height_quantile = 0.90;
@@ -70,6 +73,10 @@ public:
 
     const grid_map::GridMap& getGridMap() const { return map_; }
     const Config& getConfig() const { return config_; }
+    double getCenterRelativeHeight() const;
+    double getGroundReference() const;
+    int getGroundRoiCandidateCount() const;
+    int getGroundRoiPlanarCount() const;
 
 private:
     struct PreparedPoint {
@@ -109,8 +116,27 @@ private:
     std::vector<std::size_t> active_cell_indices_;
     std::vector<int> cell_keep_counts_;
     mutable int debug_window_counter_ = 0;
+    bool map_initialized_ = false;
+    int map_rows_ = 0;
+    int map_cols_ = 0;
+    double map_half_x_ = 0.0;
+    double map_half_y_ = 0.0;
+    double map_inv_resolution_ = 0.0;
+    std::vector<float> smoothed_height_;
+    std::vector<uint8_t> smoothed_valid_;
+    mutable std::vector<float> height_sort_buffer_;
+    std::vector<StoredPoint> prune_kept_buffer_;
+    std::vector<PreparedPoint> prepared_points_buffer_;
+    mutable double last_ground_reference_ = std::numeric_limits<double>::quiet_NaN();
+    mutable int last_ground_roi_candidate_count_ = 0;
+    mutable int last_ground_roi_planar_count_ = 0;
 
     void initializeMap(const std::string& frame_id, const grid_map::Position& center);
+    void ensureMap(const std::string& frame_id, const grid_map::Position& center);
+    void resetMapLayers();
+    void updateMapIndexLookup();
+    bool positionToCellIndex(double x, double y, int& row, int& col) const;
+    static float medianOfSmallArray(float* values, int count);
     void addFrameToHistory(const Eigen::Isometry3d& capture_pose,
                            bool pose_valid,
                            const ros::Time& stamp,
@@ -124,18 +150,28 @@ private:
     bool shouldRejectEgoPoint(const PointXYZRGBValid& point) const;
     void computeDirectionalGradients();
     void showDebugWindows() const;
+    cv::Mat renderStackedDebugLayers() const;
+    cv::Mat renderColorizedLayer(const std::string& layer_name,
+                                 double min_value,
+                                 double max_value) const;
     cv::Mat renderHeightLayer(const std::string& layer_name) const;
-    cv::Mat renderBinaryLayer(const std::string& layer_name) const;
+    cv::Mat renderBinaryLayer(const std::string& layer_name, bool draw_center_mark) const;
     cv::Vec3b viridisColor(double normalized_value) const;
     std::pair<double, double> getRobustLayerRange(const std::string& layer_name,
                                                   double fallback_min,
                                                   double fallback_max) const;
     bool getVehicleFrameIndex(int image_row, int image_col, grid_map::Index& index) const;
+    bool isDebugPixelValid(const grid_map::Index& index) const;
     void drawCenterMark(cv::Mat& image) const;
-    double estimateGroundReference(const std::vector<PreparedPoint>& points) const;
-    double meanTopHeightFraction(std::vector<float> values,
+    void drawGroundReferenceRegion(cv::Mat& image) const;
+    void vehicleBodyToImagePixel(double x, double y, double& row, double& col) const;
+    double estimateGroundReferenceFromHistory(const Eigen::Isometry3d& current_pose,
+                                              bool current_pose_valid) const;
+    bool isGroundRoiBodyPoint(double x, double y, double z) const;
+    bool isGroundRoiPlanarPoint(double x, double y) const;
+    double meanTopHeightFraction(const std::vector<float>& values,
                                  double top_fraction,
                                  int total_count) const;
-    double percentile(std::vector<float> values, double quantile) const;
+    double percentile(const std::vector<float>& values, double quantile) const;
     bool isFinitePoint(const PointXYZRGBValid& point) const;
 };
