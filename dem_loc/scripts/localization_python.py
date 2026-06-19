@@ -12,9 +12,13 @@
    首帧位置 = 对齐时刻 GlobalPose 的高斯坐标；
    之后每帧将 LocalPose 局部位移增量用 base.theta 转到全局坐标系并累加。
 
+4. DSM Patch（Odom 位置）:
+   三列 320×320：H_rel | G_long | G_lat（viridis，无掩码）；梯度同 BEV 算法，GPU 加速。
+
 用法:
     python3 localization_python.py
     # 三条轨迹默认全开；关闭某条: _draw_odom_track:=false
+    # 关闭 patch 窗口: _show_dsm_patch_window:=false
 """
 
 import math
@@ -32,14 +36,20 @@ import rospy
 
 from loc_tool.cinterface import CInterface
 from loc_tool.common_struct import InputData
-from loc_tool.coord_converter import CoordConverter
+from loc_tool.coord_converter import CoordConverter, _heading_to_math_deg
 from loc_tool.dem_tool import load_dem_tiff, normalize_to_uint8
+from loc_tool.dsm_patch import DsmPatchCropper, bev_grid_shape
 
 
 DEM_PATH = "/home/hsw/catkin_ws/doc/miluo_dsm.tif"
 DEM_MAP_RESOLUTION_M = 0.2
 
 WINDOW_DSM_TRACK = "DSM Track"
+WINDOW_DSM_PATCH = "DSM H_rel | G_long | G_lat"
+
+DEFAULT_BEV_MAP_SIZE_X = 64.0
+DEFAULT_BEV_MAP_SIZE_Y = 64.0
+DEFAULT_BEV_RESOLUTION = 0.2
 
 COLOR_GLOBAL = (255, 255, 255)
 COLOR_LOCAL = (0, 255, 255)
@@ -143,6 +153,21 @@ class PythonLocalizationNode(object):
         self.save_track_image = _param_bool("save_track_image", False)
         self.track_image_path = rospy.get_param("~track_image_path", default_track_image_path)
         self.save_track_every_n = max(1, int(rospy.get_param("~save_track_every_n", 20)))
+        self.enable_dsm_patch = _param_bool("enable_dsm_patch", True)
+        self.show_dsm_patch_window = _param_bool("show_dsm_patch_window", True)
+        self.sync_bev_from_topic = _param_bool("sync_bev_from_topic", True)
+        self.bev_map_size_x = float(rospy.get_param("~bev_map_size_x", DEFAULT_BEV_MAP_SIZE_X))
+        self.bev_map_size_y = float(rospy.get_param("~bev_map_size_y", DEFAULT_BEV_MAP_SIZE_Y))
+        self.bev_resolution = float(rospy.get_param("~bev_resolution", DEFAULT_BEV_RESOLUTION))
+        self.bev_edge_min_valid_neighbors = max(
+            1, int(rospy.get_param("~bev_edge_min_valid_neighbors", 5))
+        )
+        self.dsm_patch_every_n = max(1, int(rospy.get_param("~dsm_patch_every_n", 1)))
+        default_patch_image_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "output", "odom_dsm_patch.png")
+        )
+        self.save_dsm_patch_image = _param_bool("save_dsm_patch_image", False)
+        self.dsm_patch_image_path = rospy.get_param("~dsm_patch_image_path", default_patch_image_path)
 
         if self.show_window and os.name != "nt" and not os.environ.get("DISPLAY"):
             rospy.logwarn("DISPLAY is not set; disabling OpenCV windows.")
@@ -156,6 +181,17 @@ class PythonLocalizationNode(object):
         self.coord_converter = CoordConverter(self.dem_data)
         self.interface = CInterface()
         self.input = InputData()
+
+        self.dsm_patch_cropper = None
+        if self.enable_dsm_patch:
+            self.dsm_patch_cropper = DsmPatchCropper(
+                self.dem_data,
+                self.coord_converter,
+                map_size_x=self.bev_map_size_x,
+                map_size_y=self.bev_map_size_y,
+                resolution=self.bev_resolution,
+                edge_min_valid_neighbors=self.bev_edge_min_valid_neighbors,
+            )
 
         self.vis_track = _make_dem_color_map(self.dem_data)
         _draw_track_legend(
@@ -184,6 +220,7 @@ class PythonLocalizationNode(object):
         self.global_pose_count = 0
         self.local_pose_count = 0
         self.track_draw_count = 0
+        self.dsm_patch_count = 0
         self._last_heartbeat_time = time.time()
 
         if self.show_window:
@@ -191,6 +228,11 @@ class PythonLocalizationNode(object):
                 WINDOW_DSM_TRACK, self.track_window_width, self.track_window_height
             )
             cv2.imshow(WINDOW_DSM_TRACK, self.vis_track)
+            if self.enable_dsm_patch and self.show_dsm_patch_window:
+                rows, cols = bev_grid_shape(
+                    self.bev_map_size_x, self.bev_map_size_y, self.bev_resolution
+                )
+                _create_resizable_window(WINDOW_DSM_PATCH, cols * 3, rows)
             cv2.waitKey(1)
 
         rospy.loginfo(
@@ -206,6 +248,18 @@ class PythonLocalizationNode(object):
             self.global_heading_unit,
             self.global_heading_convention,
         )
+        if self.enable_dsm_patch:
+            rows, cols = bev_grid_shape(
+                self.bev_map_size_x, self.bev_map_size_y, self.bev_resolution
+            )
+            rospy.loginfo(
+                "DSM patch: 3x %dx%d px, %.3f m/px, physical %.1fx%.1f m",
+                cols,
+                rows,
+                self.bev_resolution,
+                self.bev_map_size_x,
+                self.bev_map_size_y,
+            )
         rospy.loginfo("Waiting for GlobalPose + LocalPose to align first frame ...")
 
     def spin(self):
@@ -225,6 +279,10 @@ class PythonLocalizationNode(object):
                 self.latest_local_pose = self.input.LocalPose
                 self._try_align_first_frame()
                 self._handle_local_pose(self.input.LocalPose)
+                updated = True
+
+            if self.sync_bev_from_topic and self.input.LidarBevGridMap_refreshflag:
+                self._sync_bev_geometry_from_msg(self.input.LidarBevGridMap)
                 updated = True
 
             if not updated:
@@ -249,11 +307,100 @@ class PythonLocalizationNode(object):
             rospy.loginfo("Waiting for GlobalPose + LocalPose ...")
         else:
             rospy.loginfo(
-                "Running: global=%d local=%d odom_steps=%d.",
+                "Running: global=%d local=%d odom_steps=%d dsm_patch=%d.",
                 self.global_pose_count,
                 self.local_pose_count,
                 self.odom_step_count,
+                self.dsm_patch_count,
             )
+
+    def _sync_bev_geometry_from_msg(self, msg):
+        if not self.enable_dsm_patch or self.dsm_patch_cropper is None:
+            return
+        try:
+            map_size_x, map_size_y, resolution = DsmPatchCropper.geometry_from_grid_map_msg(msg)
+        except AttributeError:
+            return
+        if self.dsm_patch_cropper.set_geometry(map_size_x, map_size_y, resolution):
+            self.bev_map_size_x = map_size_x
+            self.bev_map_size_y = map_size_y
+            self.bev_resolution = resolution
+            rows, cols = bev_grid_shape(map_size_x, map_size_y, resolution)
+            rospy.loginfo(
+                "Synced DSM patch geometry from BEV topic: %dx%d px, %.3f m/px, %.1fx%.1f m",
+                cols,
+                rows,
+                resolution,
+                map_size_x,
+                map_size_y,
+            )
+            if self.show_window and self.show_dsm_patch_window:
+                _create_resizable_window(WINDOW_DSM_PATCH, cols * 3, rows)
+
+    def _odom_heading_rad(self, local_pose):
+        local_heading_deg = _heading_to_math_deg(
+            local_pose.dr_heading,
+            self.local_heading_unit,
+            self.local_heading_convention,
+        )
+        return math.radians(local_heading_deg) + float(self.odom_theta)
+
+    def _update_dsm_patch(self, local_pose):
+        if not self.enable_dsm_patch or self.dsm_patch_cropper is None:
+            return
+        if self.dsm_patch_count % self.dsm_patch_every_n != 0 and self.dsm_patch_count > 0:
+            return
+
+        heading_rad = self._odom_heading_rad(local_pose)
+        patch_result = self.dsm_patch_cropper.crop_with_bev_layers(
+            self.odom_gauss_x,
+            self.odom_gauss_y,
+            heading_rad,
+        )
+        layers = patch_result["layers"]
+        self.dsm_patch_count += 1
+
+        if self.dsm_patch_count % self.log_every_n == 0:
+            h_rel = layers["H_rel_surf"]
+            finite = np.isfinite(h_rel)
+            center_h = layers.get("center_height", float("nan"))
+            h_min = float(np.min(h_rel[finite])) if finite.any() else float("nan")
+            h_max = float(np.max(h_rel[finite])) if finite.any() else float("nan")
+            g_long = layers["G_long_L"]
+            g_lat = layers["G_lat_L"]
+            g_finite = np.isfinite(g_long) & np.isfinite(g_lat)
+            rospy.loginfo(
+                "DSM patch #%d: odom_gauss=(%.2f, %.2f) heading=%.2f deg "
+                "center_h=%.2f H_rel=[%.2f, %.2f] grad_valid=%.1f%%",
+                self.dsm_patch_count,
+                self.odom_gauss_x,
+                self.odom_gauss_y,
+                math.degrees(heading_rad),
+                center_h,
+                h_min,
+                h_max,
+                float(g_finite.mean()) * 100.0 if g_finite.size else 0.0,
+            )
+
+        if self.show_window and self.show_dsm_patch_window:
+            vis = patch_result["vis_bgr"]
+            rows, cols = vis.shape[0], vis.shape[1] // 3
+            for panel in range(3):
+                cx = panel * cols + cols // 2
+                cv2.circle(vis, (cx, rows // 2), 4, (0, 0, 255), -1, cv2.LINE_AA)
+            cv2.imshow(WINDOW_DSM_PATCH, vis)
+
+        if self.save_dsm_patch_image:
+            vis = patch_result["vis_bgr"]
+            patch_dir = os.path.dirname(self.dsm_patch_image_path)
+            if patch_dir:
+                os.makedirs(patch_dir, exist_ok=True)
+            try:
+                cv2.imwrite(self.dsm_patch_image_path, vis)
+            except cv2.error as exc:
+                rospy.logwarn_throttle(
+                    5.0, "Failed to save DSM patch '%s': %s", self.dsm_patch_image_path, exc
+                )
 
     def _global_pose_gauss(self, global_pose):
         gauss_x, gauss_y, _ = self.coord_converter._extract_global_gauss_heading(
@@ -454,6 +601,7 @@ class PythonLocalizationNode(object):
             )
             self.odom_anchor_drawn = True
             self._refresh_track_view()
+            self._update_dsm_patch(local_pose)
             return
 
         delta_local_x = float(local_pose.dr_x) - self.prev_local_x
@@ -511,6 +659,7 @@ class PythonLocalizationNode(object):
             radius=4,
         )
         self._refresh_track_view()
+        self._update_dsm_patch(local_pose)
 
     def _refresh_track_view(self, force_save=False):
         self.track_draw_count += 1

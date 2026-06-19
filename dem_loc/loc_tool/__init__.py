@@ -14,13 +14,16 @@
 from .common_struct import InputData
 from .coord_converter import CoordConverter
 from .dem_tool import DemTiffData, load_dem_tiff
+from .dsm_patch import DsmPatchCropper, bev_grid_shape
 
 __all__ = [
     "CInterface",
     "CoordConverter",
     "DemTiffData",
+    "DsmPatchCropper",
     "InputData",
     "TOPIC_DEFINITIONS",
+    "bev_grid_shape",
     "load_dem_tiff",
     "make_input_data",
 ]
