@@ -94,6 +94,8 @@ def score_global_and_local(
     global_heading_convention="math",
     local_heading_unit="deg",
     local_heading_convention="math",
+    lidar_layers=None,
+    h_max=None,
 ):
     """同一帧 LiDAR BEV 下，分别在 GlobalPose / LocalPose 位置算分。"""
     if score_config is None:
@@ -103,9 +105,11 @@ def score_global_and_local(
     dsm_cropper.set_geometry(
         float(info.length_x), float(info.length_y), float(info.resolution)
     )
-    lidar_layers = parse_lidar_bev_grid_map(bev_msg)
-    m_obs = build_obs_mask(lidar_layers["M_obs"])
-    h_max = compute_h_max(lidar_layers["H_L"], m_obs, score_config)
+    if lidar_layers is None:
+        lidar_layers = parse_lidar_bev_grid_map(bev_msg)
+    if h_max is None:
+        m_obs = build_obs_mask(lidar_layers["M_obs"])
+        h_max = compute_h_max(lidar_layers["H_L"], m_obs, score_config)
 
     g_gauss_x, g_gauss_y, g_theta = global_pose_gauss_theta(
         coord_converter,

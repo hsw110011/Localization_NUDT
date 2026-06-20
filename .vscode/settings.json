@@ -7,5 +7,6 @@
     ],
     "cursorpyright.analysis.extraPaths": [
         "/opt/ros/noetic/lib/python3/dist-packages"
-    ]
+    ],
+    "cmake.sourceDirectory": "/home/hsw/catkin_ws/program/dem_loc"
 }

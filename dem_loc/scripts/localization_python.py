@@ -37,22 +37,34 @@ from loc_tool.cinterface import CInterface
 from loc_tool.common_struct import InputData
 from loc_tool.coord_converter import CoordConverter
 from loc_tool.dem_tool import load_dem_tiff, normalize_to_uint8
-from loc_tool.dsm_bev_score import DsmBevScoreConfig
+from loc_tool.cinterface import parse_lidar_bev_grid_map
+from loc_tool.dsm_bev_score import DsmBevScoreConfig, build_obs_mask, compute_h_max
 from loc_tool.dsm_bev_score_runner import (
     format_dual_score_logs,
     format_perturbation_score_logs,
+    global_pose_gauss_theta,
+    local_pose_gauss_theta,
+    score_at_pose,
     score_global_and_local,
     score_perturbation_grid,
 )
-from loc_tool.dsm_bev_score_vis import build_dual_patch_view, build_global_masked_patch_view
+from loc_tool.dsm_bev_score_vis import (
+    build_dual_patch_view,
+    build_global_masked_patch_view,
+    build_quad_patch_view,
+)
 from loc_tool.dsm_patch import DsmPatchCropper, bev_grid_shape
+from loc_tool.particle_filter import load_particle_filter_config, load_particle_filter_ini_defaults
+from loc_tool.particle_filter_runner import ParticleFilterRunner, format_pf_frame_log
+
+from self_state.msg import GlobalPose as GlobalPoseMsg
 
 
 DEM_PATH = "/home/hsw/catkin_ws/doc/miluo_dsm.tif"
 DEM_MAP_RESOLUTION_M = 0.2
 
 WINDOW_DSM_TRACK = "DSM Track"
-WINDOW_DSM_BEV_SCORE = "DSM-BEV 3x4"
+WINDOW_DSM_BEV_SCORE = "DSM-BEV 4x4"
 WINDOW_DSM_BEV_GLOBAL_MASKED = "DSM-BEV Global Masked"
 
 DEFAULT_BEV_MAP_SIZE_X = 64.0
@@ -62,6 +74,7 @@ DEFAULT_BEV_RESOLUTION = 0.2
 COLOR_GLOBAL = (255, 255, 255)
 COLOR_LOCAL = (0, 255, 255)
 COLOR_ODOM = (0, 0, 255)
+COLOR_PF = (0, 255, 0)
 
 
 def _make_dem_color_map(dem_data):
@@ -83,7 +96,7 @@ def _draw_track(vis_track, pixel, color=(255, 255, 255), previous=None, line_wid
     return previous
 
 
-def _draw_track_legend(image, draw_global, draw_local, draw_odom):
+def _draw_track_legend(image, draw_global, draw_local, draw_odom, draw_pf=False):
     if image is None or image.size == 0:
         return
     items = []
@@ -93,6 +106,8 @@ def _draw_track_legend(image, draw_global, draw_local, draw_odom):
         items.append(("LocalPose", COLOR_LOCAL))
     if draw_odom:
         items.append(("OdomDR", COLOR_ODOM))
+    if draw_pf:
+        items.append(("PF", COLOR_PF))
     x0, y0, font = 16, 24, cv2.FONT_HERSHEY_SIMPLEX
     for index, (label, color) in enumerate(items):
         y = y0 + index * 24
@@ -119,9 +134,42 @@ def _ensure_track_draw_defaults():
         "draw_global_pose_track",
         "draw_local_pose_track",
         "draw_odom_track",
+        "draw_pf_track",
     ):
         if not _cli_sets_param(name):
             rospy.set_param("~" + name, True)
+
+
+def _load_pf_ini_defaults():
+    ini_path = os.path.join(_PKG_ROOT, "config", "particle_filter.ini")
+    defaults = load_particle_filter_ini_defaults(ini_path)
+    for key, value in defaults.items():
+        param_name = "~" + key
+        if not rospy.has_param(param_name):
+            if value.lower() in ("true", "false"):
+                rospy.set_param(param_name, value.lower() == "true")
+            else:
+                try:
+                    if "." in value or "e" in value.lower():
+                        rospy.set_param(param_name, float(value))
+                    else:
+                        rospy.set_param(param_name, int(value))
+                except ValueError:
+                    rospy.set_param(param_name, value)
+
+
+def _make_dsm_patch_cropper(node_self):
+    return DsmPatchCropper(
+        node_self.dem_data,
+        node_self.coord_converter,
+        map_size_x=node_self.bev_map_size_x,
+        map_size_y=node_self.bev_map_size_y,
+        resolution=node_self.bev_resolution,
+        edge_min_valid_neighbors=node_self.bev_edge_min_valid_neighbors,
+        h_rel_deadzone_half=node_self.dsm_h_rel_deadzone_half,
+        grad_deadzone_half=node_self.dsm_grad_deadzone_half,
+        device=node_self.pf_device if node_self.enable_particle_filter else None,
+    )
 
 
 def _param_bool(name, default):
@@ -210,6 +258,16 @@ class PythonLocalizationNode(object):
             rospy.get_param("~dsm_grad_deadzone_half", 0.15)
         )
 
+        self.pf_config = load_particle_filter_config(rospy.get_param)
+        self.enable_particle_filter = bool(self.pf_config.enable)
+        self.pf_device = str(self.pf_config.device)
+        self.draw_pf_track = _param_bool("draw_pf_track", self.enable_particle_filter)
+        self.pf_log_every_n = max(1, int(self.pf_config.pf_log_every_n))
+        default_pf_debug_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", self.pf_config.debug_dir)
+        )
+        self.pf_config.debug_dir = rospy.get_param("~pf_debug_dir", default_pf_debug_dir)
+
         if self.show_window and os.name != "nt" and not os.environ.get("DISPLAY"):
             rospy.logwarn("DISPLAY is not set; disabling OpenCV windows.")
             self.show_window = False
@@ -224,16 +282,30 @@ class PythonLocalizationNode(object):
         self.input = InputData()
 
         self.dsm_patch_cropper = None
-        if self.enable_dsm_bev_score:
-            self.dsm_patch_cropper = DsmPatchCropper(
-                self.dem_data,
+        if self.enable_dsm_bev_score or self.enable_particle_filter:
+            self.dsm_patch_cropper = _make_dsm_patch_cropper(self)
+
+        self.pf_runner = None
+        self.pf_pose_pub = None
+        self.pf_track_point = None
+        self.pf_update_count = 0
+        if self.enable_particle_filter:
+            if self.dsm_patch_cropper is None:
+                raise RuntimeError("particle filter requires DSM patch cropper")
+            self.pf_runner = ParticleFilterRunner(
+                self.pf_config,
+                self.score_config,
                 self.coord_converter,
-                map_size_x=self.bev_map_size_x,
-                map_size_y=self.bev_map_size_y,
-                resolution=self.bev_resolution,
-                edge_min_valid_neighbors=self.bev_edge_min_valid_neighbors,
-                h_rel_deadzone_half=self.dsm_h_rel_deadzone_half,
-                grad_deadzone_half=self.dsm_grad_deadzone_half,
+                self.dsm_patch_cropper,
+                global_heading_unit=self.global_heading_unit,
+                global_heading_convention=self.global_heading_convention,
+                local_heading_unit=self.local_heading_unit,
+                local_heading_convention=self.local_heading_convention,
+            )
+            self.pf_pose_pub = rospy.Publisher(
+                self.pf_config.pf_pose_topic,
+                GlobalPoseMsg,
+                queue_size=10,
             )
 
         self.vis_track = _make_dem_color_map(self.dem_data)
@@ -242,6 +314,7 @@ class PythonLocalizationNode(object):
             self.draw_global_pose_track,
             self.draw_local_pose_track,
             self.draw_odom_track,
+            draw_pf=self.draw_pf_track,
         )
 
         self.latest_global_pose = None
@@ -265,6 +338,8 @@ class PythonLocalizationNode(object):
         self.local_pose_count = 0
         self.track_draw_count = 0
         self.dsm_bev_score_count = 0
+        self._last_global_ref_score = None
+        self._last_bev_vis_cache = None
         self._last_heartbeat_time = time.time()
 
         if self.show_window:
@@ -272,12 +347,12 @@ class PythonLocalizationNode(object):
                 WINDOW_DSM_TRACK, self.track_window_width, self.track_window_height
             )
             cv2.imshow(WINDOW_DSM_TRACK, self.vis_track)
-            if self.enable_dsm_bev_score and self.show_dsm_bev_score_window:
+            if self.show_window and (self.enable_dsm_bev_score or self.enable_particle_filter) and self.show_dsm_bev_score_window:
                 rows, cols = bev_grid_shape(
                     self.bev_map_size_x, self.bev_map_size_y, self.bev_resolution
                 )
                 _create_resizable_window(
-                    WINDOW_DSM_BEV_SCORE, cols * 4, (rows + 28) * 3
+                    WINDOW_DSM_BEV_SCORE, cols * 4, (rows + 28) * 4
                 )
             if self.enable_dsm_bev_score and self.show_global_masked_patch_window:
                 rows, cols = bev_grid_shape(
@@ -306,12 +381,19 @@ class PythonLocalizationNode(object):
                 self.bev_map_size_x, self.bev_map_size_y, self.bev_resolution
             )
             rospy.loginfo(
-                "DSM-BEV score: 3x4 grid %dx%d px/layer (H_rel|G_long|G_lat|M_L), alpha=(%.2f, %.2f, %.2f)",
+                "DSM-BEV score: 4x4 grid %dx%d px/layer (H_rel|G_long|G_lat|M_L), alpha=(%.2f, %.2f, %.2f)",
                 cols,
                 rows,
                 self.score_config.alpha_h,
                 self.score_config.alpha_gx,
                 self.score_config.alpha_gy,
+            )
+        if self.enable_particle_filter:
+            rospy.loginfo(
+                "Particle filter: N=%d device=%s topic=%s",
+                self.pf_config.num_particles,
+                self.pf_device,
+                self.pf_config.pf_pose_topic,
             )
         rospy.loginfo("Waiting for GlobalPose + LocalPose to align first frame ...")
 
@@ -339,8 +421,8 @@ class PythonLocalizationNode(object):
                 self._sync_bev_geometry_from_msg(self.input.LidarBevGridMap)
                 updated = True
 
-            if self.enable_dsm_bev_score:
-                self._try_update_dsm_bev_score()
+            if self.enable_dsm_bev_score or self.enable_particle_filter:
+                self._try_update_bev_frame()
 
             if not updated:
                 self._log_waiting_heartbeat()
@@ -364,11 +446,12 @@ class PythonLocalizationNode(object):
             rospy.loginfo("Waiting for GlobalPose + LocalPose ...")
         else:
             rospy.loginfo(
-                "Running: global=%d local=%d odom_steps=%d score=%d.",
+                "Running: global=%d local=%d odom_steps=%d score=%d pf=%d.",
                 self.global_pose_count,
                 self.local_pose_count,
                 self.odom_step_count,
                 self.dsm_bev_score_count,
+                self.pf_update_count,
             )
 
     def _sync_bev_geometry_from_msg(self, msg):
@@ -383,112 +466,311 @@ class PythonLocalizationNode(object):
             self.bev_map_size_y = map_size_y
             self.bev_resolution = resolution
             rows, cols = bev_grid_shape(map_size_x, map_size_y, resolution)
-            if self.show_window and self.enable_dsm_bev_score and self.show_dsm_bev_score_window:
-                _create_resizable_window(WINDOW_DSM_BEV_SCORE, cols * 4, (rows + 28) * 3)
+            if self.show_window and (self.enable_dsm_bev_score or self.enable_particle_filter) and self.show_dsm_bev_score_window:
+                _create_resizable_window(WINDOW_DSM_BEV_SCORE, cols * 4, (rows + 28) * 4)
             if self.show_window and self.enable_dsm_bev_score and self.show_global_masked_patch_window:
                 _create_resizable_window(
                     WINDOW_DSM_BEV_GLOBAL_MASKED, cols * 4, (rows + 28) + 32
                 )
 
-    def _try_update_dsm_bev_score(self):
+    def _parse_bev_layers(self):
+        """解析 LiDAR BEV 一次，供 PF / 可视化复用。"""
+        bev_msg = self.latest_bev_msg
+        info = bev_msg.info
+        self.dsm_patch_cropper.set_geometry(
+            float(info.length_x), float(info.length_y), float(info.resolution)
+        )
+        lidar_layers = parse_lidar_bev_grid_map(bev_msg)
+        m_obs = build_obs_mask(lidar_layers["M_obs"])
+        h_max = compute_h_max(lidar_layers["H_L"], m_obs, self.score_config)
+        return lidar_layers, h_max
+
+    def _try_update_bev_frame(self):
+        need_score = self.enable_dsm_bev_score
+        need_pf = self.enable_particle_filter and self.pf_runner is not None
+        if not (need_score or need_pf):
+            return
         if (
-            not self.enable_dsm_bev_score
-            or self.dsm_patch_cropper is None
+            self.dsm_patch_cropper is None
             or not self.first_frame_aligned
-            or self.local_pose_base is None
-            or self.latest_global_pose is None
-            or self.latest_local_pose is None
             or self.latest_bev_msg is None
         ):
             return
-
-        if not (
-            self.input.GlobalPose_refreshflag
-            or self.input.LocalPose_refreshflag
-            or self.input.LidarBevGridMap_refreshflag
+        if need_score and (
+            self.local_pose_base is None
+            or self.latest_global_pose is None
+            or self.latest_local_pose is None
         ):
             return
-
-        if (
-            self.dsm_bev_score_count % self.dsm_bev_score_every_n != 0
-            and self.dsm_bev_score_count > 0
-        ):
+        if need_pf and not self.pf_runner.initialized:
+            return
+        if not self.input.LidarBevGridMap_refreshflag:
             return
 
         try:
-            result = score_global_and_local(
-                self.coord_converter,
-                self.dsm_patch_cropper,
-                self.latest_global_pose,
-                self.latest_local_pose,
-                self.local_pose_base,
-                self.latest_bev_msg,
-                score_config=self.score_config,
-                global_heading_unit=self.global_heading_unit,
-                global_heading_convention=self.global_heading_convention,
-                local_heading_unit=self.local_heading_unit,
-                local_heading_convention=self.local_heading_convention,
-            )
+            lidar_layers, h_max = self._parse_bev_layers()
         except (KeyError, ValueError) as exc:
-            rospy.logwarn_throttle(5.0, "DSM-BEV score skipped: %s", exc)
+            rospy.logwarn_throttle(5.0, "BEV parse skipped: %s", exc)
             return
 
-        self.dsm_bev_score_count += 1
-
-        if self.dsm_bev_score_count % self.log_every_n == 0:
-            g_score = float(result["global"]["score"]["score"])
-            l_score = float(result["local"]["score"]["score"])
-            verbose = self.score_verbose or max(g_score, l_score) < self.score_verbose_below
-            rospy.loginfo(
-                format_dual_score_logs(
-                    result, self.dsm_bev_score_count, verbose=verbose
-                )
-            )
-
-        if (
-            self.enable_perturbation_score_debug
-            and self.dsm_bev_score_count % self.perturbation_score_every_n == 0
-        ):
+        pf_estimate = None
+        global_ref = None
+        if need_pf:
+            timestamp = None
+            if self.latest_global_pose is not None:
+                timestamp = getattr(self.latest_global_pose, "local_time", None)
             try:
-                perturb = score_perturbation_grid(
-                    self.dsm_patch_cropper,
-                    result["global"]["gauss_x"],
-                    result["global"]["gauss_y"],
-                    result["global"]["theta"],
-                    result["lidar_layers"],
+                pf_estimate = self.pf_runner.on_bev_message(
+                    self.latest_bev_msg,
+                    lidar_layers=lidar_layers,
+                    timestamp=timestamp,
+                    template_global_pose=self.latest_global_pose,
+                )
+            except (KeyError, ValueError, RuntimeError) as exc:
+                rospy.logwarn_throttle(5.0, "Particle filter update skipped: %s", exc)
+                pf_estimate = None
+
+            if pf_estimate is not None:
+                if self.latest_global_pose is not None:
+                    try:
+                        g_gauss_x, g_gauss_y, g_theta = global_pose_gauss_theta(
+                            self.coord_converter,
+                            self.latest_global_pose,
+                            heading_unit=self.global_heading_unit,
+                            heading_convention=self.global_heading_convention,
+                        )
+                        global_score, global_dsm = score_at_pose(
+                            self.dsm_patch_cropper,
+                            g_gauss_x,
+                            g_gauss_y,
+                            g_theta,
+                            lidar_layers,
+                            self.score_config,
+                            h_max=h_max,
+                        )
+                        global_ref = (global_score, global_dsm)
+                        self._last_global_ref_score = float(global_score["score"])
+                    except (KeyError, ValueError):
+                        global_ref = None
+
+                self.pf_update_count += 1
+                pf_msg = pf_estimate.get("pf_msg")
+                if pf_msg is not None and self.pf_pose_pub is not None:
+                    self.pf_pose_pub.publish(pf_msg)
+
+                if self.pf_update_count % self.pf_log_every_n == 0:
+                    g_sc = (
+                        float(self._last_global_ref_score)
+                        if self._last_global_ref_score is not None
+                        else None
+                    )
+                    g_detail = global_ref[0] if global_ref is not None else None
+                    l_sc = None
+                    l_detail = None
+                    if self.latest_local_pose is not None and self.local_pose_base is not None:
+                        try:
+                            l_gauss_x, l_gauss_y, l_theta = local_pose_gauss_theta(
+                                self.coord_converter,
+                                self.latest_local_pose,
+                                self.local_pose_base,
+                                local_heading_unit=self.local_heading_unit,
+                                local_heading_convention=self.local_heading_convention,
+                            )
+                            local_score_dict, _ = score_at_pose(
+                                self.dsm_patch_cropper,
+                                l_gauss_x,
+                                l_gauss_y,
+                                l_theta,
+                                lidar_layers,
+                                self.score_config,
+                                h_max=h_max,
+                            )
+                            l_sc = float(local_score_dict["score"])
+                            l_detail = local_score_dict
+                        except (KeyError, ValueError):
+                            pass
+
+                    pf_best_sc = float(pf_estimate.get("max_score", float("nan")))
+                    pf_best = pf_estimate.get("pf_best")
+                    if pf_best is not None:
+                        pf_best_sc = float(pf_best.get("score", pf_best_sc))
+
+                    verbose = self.score_verbose
+                    if g_sc is not None and g_sc < self.score_verbose_below:
+                        verbose = True
+                    if l_sc is not None and l_sc < self.score_verbose_below:
+                        verbose = True
+
+                    rospy.loginfo(
+                        format_pf_frame_log(
+                            self.pf_update_count,
+                            global_score=g_sc,
+                            local_score=l_sc,
+                            pf_best_score=pf_best_sc,
+                            estimate=pf_estimate,
+                            verbose=verbose,
+                            global_score_detail=g_detail,
+                            local_score_detail=l_detail,
+                            motion=getattr(self.pf_runner.pf, "last_motion", None),
+                        )
+                    )
+
+                if self.draw_pf_track and pf_msg is not None:
+                    pixel = self.coord_converter.global_pose_to_dem_pixel(pf_msg)
+                    if pixel is not None:
+                        self.pf_track_point = _draw_track(
+                            self.vis_track,
+                            pixel,
+                            color=COLOR_PF,
+                            previous=self.pf_track_point,
+                            line_width=2,
+                            radius=4,
+                        )
+                        self._refresh_track_view()
+
+        run_score_vis = need_score and (
+            self.dsm_bev_score_count % self.dsm_bev_score_every_n == 0
+            or self.dsm_bev_score_count == 0
+        )
+        use_pf_quad = (
+            pf_estimate is not None
+            and pf_estimate.get("pf_best") is not None
+            and self.latest_global_pose is not None
+        )
+
+        if not run_score_vis and not use_pf_quad:
+            return
+
+        try:
+            if use_pf_quad:
+                pf_best = pf_estimate["pf_best"]
+                if global_ref is None:
+                    g_gauss_x, g_gauss_y, g_theta = global_pose_gauss_theta(
+                        self.coord_converter,
+                        self.latest_global_pose,
+                        heading_unit=self.global_heading_unit,
+                        heading_convention=self.global_heading_convention,
+                    )
+                    global_score, global_dsm = score_at_pose(
+                        self.dsm_patch_cropper,
+                        g_gauss_x,
+                        g_gauss_y,
+                        g_theta,
+                        lidar_layers,
+                        self.score_config,
+                        h_max=h_max,
+                    )
+                    global_ref = (global_score, global_dsm)
+                    self._last_global_ref_score = float(global_score["score"])
+                else:
+                    global_score, global_dsm = global_ref
+                vis = build_quad_patch_view(
+                    lidar_layers,
+                    global_dsm["layers"],
+                    global_score["score"],
+                    pf_best["layers"],
+                    pf_best["score"],
+                    pf_best_pose=pf_best,
                     score_config=self.score_config,
-                    h_max=result.get("h_max"),
                 )
-                rospy.loginfo(
-                    format_perturbation_score_logs(perturb, self.dsm_bev_score_count)
+                self._last_bev_vis_cache = vis
+                if need_score:
+                    self.dsm_bev_score_count += 1
+
+                if self.save_dsm_bev_score_debug and (
+                    self.dsm_bev_score_count % self.dsm_bev_score_debug_every_n == 0
+                ):
+                    os.makedirs(self.dsm_bev_score_debug_dir, exist_ok=True)
+                    out_path = os.path.join(
+                        self.dsm_bev_score_debug_dir,
+                        "score_{:06d}.png".format(self.dsm_bev_score_count),
+                    )
+                    try:
+                        cv2.imwrite(out_path, vis)
+                    except cv2.error as exc:
+                        rospy.logwarn_throttle(
+                            5.0, "Failed to save DSM-BEV score debug '%s': %s", out_path, exc
+                        )
+            elif need_score:
+                result = score_global_and_local(
+                    self.coord_converter,
+                    self.dsm_patch_cropper,
+                    self.latest_global_pose,
+                    self.latest_local_pose,
+                    self.local_pose_base,
+                    self.latest_bev_msg,
+                    score_config=self.score_config,
+                    global_heading_unit=self.global_heading_unit,
+                    global_heading_convention=self.global_heading_convention,
+                    local_heading_unit=self.local_heading_unit,
+                    local_heading_convention=self.local_heading_convention,
+                    lidar_layers=lidar_layers,
+                    h_max=h_max,
                 )
-            except (KeyError, ValueError) as exc:
-                rospy.logwarn_throttle(5.0, "DSM-BEV perturbation score skipped: %s", exc)
+                self.dsm_bev_score_count += 1
+                self._last_global_ref_score = float(result["global"]["score"]["score"])
 
-        if self.show_window and self.show_dsm_bev_score_window:
-            vis = build_dual_patch_view(result)
-            cv2.imshow(WINDOW_DSM_BEV_SCORE, vis)
+                if self.dsm_bev_score_count % self.log_every_n == 0:
+                    g_score = float(result["global"]["score"]["score"])
+                    l_score = float(result["local"]["score"]["score"])
+                    verbose = self.score_verbose or max(g_score, l_score) < self.score_verbose_below
+                    rospy.loginfo(
+                        format_dual_score_logs(
+                            result, self.dsm_bev_score_count, verbose=verbose
+                        )
+                    )
 
-        if self.show_window and self.show_global_masked_patch_window:
-            cv2.imshow(
-                WINDOW_DSM_BEV_GLOBAL_MASKED,
-                build_global_masked_patch_view(result, score_config=self.score_config),
-            )
+                if (
+                    self.enable_perturbation_score_debug
+                    and self.dsm_bev_score_count % self.perturbation_score_every_n == 0
+                ):
+                    try:
+                        perturb = score_perturbation_grid(
+                            self.dsm_patch_cropper,
+                            result["global"]["gauss_x"],
+                            result["global"]["gauss_y"],
+                            result["global"]["theta"],
+                            lidar_layers,
+                            score_config=self.score_config,
+                            h_max=h_max,
+                        )
+                        rospy.loginfo(
+                            format_perturbation_score_logs(perturb, self.dsm_bev_score_count)
+                        )
+                    except (KeyError, ValueError) as exc:
+                        rospy.logwarn_throttle(
+                            5.0, "DSM-BEV perturbation score skipped: %s", exc
+                        )
 
-        if self.save_dsm_bev_score_debug and (
-            self.dsm_bev_score_count % self.dsm_bev_score_debug_every_n == 0
-        ):
-            os.makedirs(self.dsm_bev_score_debug_dir, exist_ok=True)
-            out_path = os.path.join(
-                self.dsm_bev_score_debug_dir,
-                "score_{:06d}.png".format(self.dsm_bev_score_count),
-            )
-            try:
-                cv2.imwrite(out_path, build_dual_patch_view(result))
-            except cv2.error as exc:
-                rospy.logwarn_throttle(
-                    5.0, "Failed to save DSM-BEV score debug '%s': %s", out_path, exc
-                )
+                vis = build_dual_patch_view(result)
+                self._last_bev_vis_cache = vis
+
+                if self.show_window and self.show_global_masked_patch_window:
+                    cv2.imshow(
+                        WINDOW_DSM_BEV_GLOBAL_MASKED,
+                        build_global_masked_patch_view(result, score_config=self.score_config),
+                    )
+
+                if self.save_dsm_bev_score_debug and (
+                    self.dsm_bev_score_count % self.dsm_bev_score_debug_every_n == 0
+                ):
+                    os.makedirs(self.dsm_bev_score_debug_dir, exist_ok=True)
+                    out_path = os.path.join(
+                        self.dsm_bev_score_debug_dir,
+                        "score_{:06d}.png".format(self.dsm_bev_score_count),
+                    )
+                    try:
+                        cv2.imwrite(out_path, vis)
+                    except cv2.error as exc:
+                        rospy.logwarn_throttle(
+                            5.0, "Failed to save DSM-BEV score debug '%s': %s", out_path, exc
+                        )
+        except (KeyError, ValueError) as exc:
+            rospy.logwarn_throttle(5.0, "DSM-BEV vis skipped: %s", exc)
+            return
+
+        if self.show_window and self.show_dsm_bev_score_window and self._last_bev_vis_cache is not None:
+            cv2.imshow(WINDOW_DSM_BEV_SCORE, self._last_bev_vis_cache)
 
     def _global_pose_gauss(self, global_pose):
         gauss_x, gauss_y, _ = self.coord_converter._extract_global_gauss_heading(
@@ -526,6 +808,22 @@ class PythonLocalizationNode(object):
         self.odom_anchor_drawn = False
         self.odom_step_count = 0
         self.first_frame_aligned = True
+
+        if self.pf_runner is not None:
+            g_x, g_y, _ = self.pf_runner.initialize_from_global_pose(global_pose)
+            self.pf_runner.set_odom_anchor(
+                self.odom_theta, self.prev_local_x, self.prev_local_y
+            )
+            rospy.loginfo(
+                "Particle filter initialized at GlobalPose (GNSS): gauss=(%.2f, %.2f) "
+                "init_std=(%.1f, %.1f, %.3f) rad N=%d",
+                g_x,
+                g_y,
+                self.pf_runner.pf.pf_config.init_std_x,
+                self.pf_runner.pf.pf_config.init_std_y,
+                self.pf_runner.pf.pf_config.init_std_yaw,
+                self.pf_runner.pf.pf_config.num_particles,
+            )
 
         anchor_pixel = cc.global_pose_to_dem_pixel(global_pose)
         rospy.loginfo("First-frame aligned.")
@@ -577,6 +875,9 @@ class PythonLocalizationNode(object):
         # 先画 Odom，再画 LocalPose，避免黄线完全盖住红色 Odom 轨迹
         if self.draw_odom_track:
             self._update_odom_track(msg)
+
+        if self.pf_runner is not None:
+            self.pf_runner.on_local_pose(msg)
 
         if self.draw_local_pose_track:
             self._draw_local_pose_track(msg)
@@ -680,6 +981,7 @@ class PythonLocalizationNode(object):
 def main():
     rospy.init_node("localization_python_node")
     _ensure_track_draw_defaults()
+    _load_pf_ini_defaults()
     node = PythonLocalizationNode()
     node.spin()
 
