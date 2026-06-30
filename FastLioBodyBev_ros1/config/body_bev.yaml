@@ -1,0 +1,47 @@
+input_topic: "/cloud_registered_body"
+odometry_topic: "/Odometry"
+output_topic: "/lidar_bev/grid_map"
+use_odometry_frame: true
+use_ransac_ground: true
+odometry_frame_id: "camera_init"
+body_frame_id: "body"
+
+resolution: 0.2
+map_size_x: 64.0
+map_size_y: 64.0
+point_min_z: -100.0
+point_max_z: 200.0
+update_rate_hz: 10.0
+
+# 与 GridMap 一致：剔除自车附近点（车体坐标系）
+ego_filter_enabled: true
+ego_box_min_x: -3.0
+ego_box_max_x: 2.0
+ego_box_min_y: -1.0
+ego_box_max_y: 1.0
+
+near_inner_radius: 3
+near_outer_radius: 7
+ground_candidate_min_z: -5.0
+ground_candidate_max_z: 5.0
+ground_front_half_angle_deg: 15.0
+ground_require_forward: true
+ground_failure_fallback_z: 0.0
+ground_min_points: 50
+
+surface_top_height_fraction: 0.15
+h_rel_deadzone_half_width: 0.20
+grad_deadzone_half_width: 0.15
+# 梯度幅值上限 (m/m)，0=不限制
+grad_cap: 0
+
+# 每格累计高度样本数，0=不限制（与 GridMap 一致，提升 BEV 密度）
+cell_max_points: 0
+# 多帧累计帧数上限，0=不限制（与 GridMap 一致，累计 BEV 窗口内全部历史点）
+accumulation_frame_count: 0
+
+enable_temporal_height_filter: false
+enable_spatial_height_smoothing: false
+edge_min_valid_neighbors: 5
+debug_window_stride: 2
+show_windows: true

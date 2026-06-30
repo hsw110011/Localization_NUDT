@@ -485,6 +485,25 @@ class PythonLocalizationNode(object):
         h_max = compute_h_max(lidar_layers["H_L"], m_obs, self.score_config)
         return lidar_layers, h_max
 
+    def _show_global_masked_patch(self, lidar_layers, global_layers, global_score):
+        if not (
+            self.show_window
+            and self.enable_dsm_bev_score
+            and self.show_global_masked_patch_window
+        ):
+            return
+        result = {
+            "lidar_layers": lidar_layers,
+            "global": {
+                "dsm_result": {"layers": global_layers},
+                "score": global_score,
+            },
+        }
+        cv2.imshow(
+            WINDOW_DSM_BEV_GLOBAL_MASKED,
+            build_global_masked_patch_view(result, score_config=self.score_config),
+        )
+
     def _try_update_bev_frame(self):
         need_score = self.enable_dsm_bev_score
         need_pf = self.enable_particle_filter and self.pf_runner is not None
@@ -674,6 +693,9 @@ class PythonLocalizationNode(object):
                     score_config=self.score_config,
                 )
                 self._last_bev_vis_cache = vis
+                self._show_global_masked_patch(
+                    lidar_layers, global_dsm["layers"], global_score
+                )
                 if need_score:
                     self.dsm_bev_score_count += 1
 
@@ -745,11 +767,11 @@ class PythonLocalizationNode(object):
                 vis = build_dual_patch_view(result)
                 self._last_bev_vis_cache = vis
 
-                if self.show_window and self.show_global_masked_patch_window:
-                    cv2.imshow(
-                        WINDOW_DSM_BEV_GLOBAL_MASKED,
-                        build_global_masked_patch_view(result, score_config=self.score_config),
-                    )
+                self._show_global_masked_patch(
+                    result["lidar_layers"],
+                    result["global"]["dsm_result"]["layers"],
+                    result["global"]["score"],
+                )
 
                 if self.save_dsm_bev_score_debug and (
                     self.dsm_bev_score_count % self.dsm_bev_score_debug_every_n == 0

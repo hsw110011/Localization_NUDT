@@ -31,7 +31,7 @@ class ParticleFilterConfig(object):
 
     motion_std_x: float = 0.30  # 平移噪声系数：std_x = coeff * |delta_x| (m)
     motion_std_y: float = 0.15  # 平移噪声系数：std_y = coeff * |delta_y| (m)
-    motion_std_yaw: float = 0.01  # 航向噪声系数：std_yaw = coeff * |delta_yaw| (rad)
+    motion_std_yaw: float = 0.004  # std_yaw = coeff * |delta_yaw| (rad)
 
     score_is_cost: bool = True
     # 组内权重锐度：1.0=仅按 score/max(score)；<1 进一步放大 top 粒子权重
@@ -47,7 +47,7 @@ class ParticleFilterConfig(object):
     enable_roughening: bool = True
     roughening_std_x: float = 0.02
     roughening_std_y: float = 0.02
-    roughening_std_yaw: float = 0.002
+    roughening_std_yaw: float = 0.001
 
     save_debug: bool = True
     save_particle_csv: bool = False
@@ -75,7 +75,7 @@ def load_particle_filter_config(get_param):
         init_std_yaw=float(_p("pf_init_std_yaw", 0.10)),
         motion_std_x=float(_p("pf_motion_std_x", 0.30)),
         motion_std_y=float(_p("pf_motion_std_y", 0.15)),
-        motion_std_yaw=float(_p("pf_motion_std_yaw", 0.01)),
+        motion_std_yaw=float(_p("pf_motion_std_yaw", 0.004)),
         score_is_cost=bool(_p("pf_score_is_cost", True)),
         score_temperature=float(_p("pf_score_temperature", 1.0)),
         estimate_mode=str(_p("pf_estimate_mode", "elite_mean")),
@@ -86,7 +86,7 @@ def load_particle_filter_config(get_param):
         enable_roughening=bool(_p("pf_enable_roughening", True)),
         roughening_std_x=float(_p("pf_roughening_std_x", 0.02)),
         roughening_std_y=float(_p("pf_roughening_std_y", 0.02)),
-        roughening_std_yaw=float(_p("pf_roughening_std_yaw", 0.002)),
+        roughening_std_yaw=float(_p("pf_roughening_std_yaw", 0.001)),
         save_debug=bool(_p("pf_save_debug", True)),
         save_particle_csv=bool(_p("pf_save_particle_csv", False)),
         save_score_csv=bool(_p("pf_save_score_csv", True)),
