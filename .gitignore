@@ -9,7 +9,6 @@ Thumbs.db
 
 # Local agent/tool state
 .agents/
-.codex/
 .codegraph/
 
 # Python
