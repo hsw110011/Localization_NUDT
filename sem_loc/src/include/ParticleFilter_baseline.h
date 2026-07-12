@@ -21,7 +21,7 @@ public:
     // map_data: 包含全局 TDF 地图的数据
     // init_x, init_y, init_theta: 初始位姿
     // std_x, std_y, std_theta: 初始分布的标准差
-    void Init(const SatelliteData& map_data, double init_x, double init_y, double init_theta, 
+    void Init(const SatelliteData& map_data, double init_x, double init_y, double init_theta,
              double std_x = 2.0, double std_y = 2.0, double std_theta = 0.5);
 
     // 预测步骤 (Motion Model — Exact SE(2) Composition + 各向异性噪声)
@@ -87,7 +87,7 @@ private:
     // 地图数据 (GPU Tensor)
     // Shape: [1, C, H, W]
     torch::Tensor global_tdf_;
-    
+
     // 地图元数据
     double map_origin_lon_, map_origin_lat_;
     double map_origin_x_, map_origin_y_;
@@ -95,7 +95,7 @@ private:
     double map_resolution_;
     double map_width_m_, map_height_m_;
     int map_cols_, map_rows_;
-    
+
     // 观测参数
     double obs_resolution_;
     int obs_size_ = 400; // 观测窗口大小 (Pixels)

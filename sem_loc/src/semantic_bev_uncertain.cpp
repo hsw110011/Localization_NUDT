@@ -22,7 +22,7 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/common/transforms.h>
-#include <pcl/impl/point_types.hpp> 
+#include <pcl/impl/point_types.hpp>
 
 // OpenCV
 #include <opencv2/opencv.hpp>
@@ -35,9 +35,9 @@
 #include <cmath>
 
 // ==========================================
-// 1. 自定义 PCL 点类型 
+// 1. 自定义 PCL 点类型
 // ==========================================
-struct PointXYZIRGBLabelCurvature 
+struct PointXYZIRGBLabelCurvature
 {
     PCL_ADD_POINT4D;                    // x, y, z
     float intensity;                    // 强度 - Offset 16
@@ -58,7 +58,7 @@ struct PointXYZIRGBLabelCurvature
     };                                  // Color - Offset 20
     uint32_t label;                     // Label - Offset 24
     float curvature;                    // Curvature - Offset 28
-    
+
     // New field for probabilities
     float merged_probs[3];              // Offset 32
 
@@ -88,7 +88,7 @@ void extract_merged_probs(const sensor_msgs::PointCloud2ConstPtr &msg, pcl::Poin
         }
     }
     if (field_idx == -1) return;
-    
+
     const auto& field = msg->fields[field_idx];
     if (field.datatype == sensor_msgs::PointField::FLOAT32) {
         size_t point_step = msg->point_step;
@@ -97,7 +97,7 @@ void extract_merged_probs(const sensor_msgs::PointCloud2ConstPtr &msg, pcl::Poin
         size_t num_points = msg->width * msg->height;
         // PCL cloud size might differ slightly if filtered? No, usually 1-1 map from fromROSMsg
         if (cloud.points.size() != num_points) return;
-        
+
         for (size_t i = 0; i < num_points; ++i) {
             const float* probs = reinterpret_cast<const float*>(data_ptr + i * point_step + offset);
             cloud.points[i].merged_probs[0] = probs[0];
@@ -118,7 +118,7 @@ struct GridKey {
 
 struct GridKeyHash {
     std::size_t operator()(const GridKey& k) const {
-        return ((int64_t)k.u << 32) | ((uint32_t)k.v); 
+        return ((int64_t)k.u << 32) | ((uint32_t)k.v);
     }
 };
 
@@ -134,10 +134,10 @@ class VisualBevMapper {
 public:
     VisualBevMapper() : nh_("~") {
         // --- 参数 ---
-        nh_.param("resolution", resolution_, 0.15); 
+        nh_.param("resolution", resolution_, 0.15);
         nh_.param("view_range", view_range_, 60.0);
         img_size_ = static_cast<int>(view_range_ / resolution_);
-        
+
         // --- 类别设置 (修正：只保留 0, 1, 2) ---
         // Original: {"road", "plant", "building"}
         // New Request: 0=Road, 1=Building, 2=Plant
@@ -192,7 +192,7 @@ private:
             msg->pose.pose.orientation.y,
             msg->pose.pose.orientation.z
         );
-        
+
         cur_pose_mat_ = Eigen::Isometry3d::Identity();
         cur_pose_mat_.rotate(q);
         cur_pose_mat_.pretranslate(cur_pos_);
@@ -229,7 +229,7 @@ private:
             GridKey key = {u, v};
 
             // 保留最高点的概率
-            // const auto& pt_orig = cloud->points[i]; 
+            // const auto& pt_orig = cloud->points[i];
             // auto it = global_map_.find(key);
             // if (it == global_map_.end() || pt.z > it->second.z) {
             //     GridCell cell;
@@ -312,7 +312,7 @@ private:
         }
     }
 
-    void timerRenderCb(const ros::TimerEvent&) 
+    void timerRenderCb(const ros::TimerEvent&)
     {
         if (!has_odom_ || global_map_.empty()) return;
 
@@ -321,46 +321,46 @@ private:
         // 1. 清理过远的旧地图点
         int cx = static_cast<int>(cur_pos_.x() / resolution_);
         int cy = static_cast<int>(cur_pos_.y() / resolution_);
-        int cleanup_dist = static_cast<int>(img_size_ * 1.5); 
+        int cleanup_dist = static_cast<int>(img_size_ * 1.5);
 
-        for (auto it = global_map_.begin(); it != global_map_.end(); ) 
+        for (auto it = global_map_.begin(); it != global_map_.end(); )
         {
-            if (std::abs(it->first.u - cx) > cleanup_dist || std::abs(it->first.v - cy) > cleanup_dist) 
+            if (std::abs(it->first.u - cx) > cleanup_dist || std::abs(it->first.v - cy) > cleanup_dist)
             {
                 it = global_map_.erase(it);
-            } 
-            else 
+            }
+            else
             {
                 ++it;
             }
         }
 
         // 2. 准备画布 - CV_32FC4 (增加一个 Entropy 通道)
-        int hs = img_size_ / 2;     
-        int sr = static_cast<int>(hs * 1.5); 
-        int side = sr * 2;          
+        int hs = img_size_ / 2;
+        int sr = static_cast<int>(hs * 1.5);
+        int side = sr * 2;
 
         cv::Mat canvas_probs = cv::Mat::zeros(side, side, CV_32FC4);
-        
+
         const float max_entropy = std::log(3.0f); // 3 classes
 
         // 3. 填充画布
-        for (const auto& kv : global_map_) 
+        for (const auto& kv : global_map_)
         {
             int local_u = kv.first.u - cx + sr;
-            int local_v = sr - (kv.first.v - cy); 
+            int local_v = sr - (kv.first.v - cy);
 
-            if (local_u >= 0 && local_u < side && local_v >= 0 && local_v < side) 
+            if (local_u >= 0 && local_u < side && local_v >= 0 && local_v < side)
             {
                 const auto& cell = kv.second;
-                
+
                 // 计算熵
                 float entropy = 0.0f;
                 // 暂时认为概率和为1，或者直接计算 sum
-                for(int k=0; k<3; ++k) 
+                for(int k=0; k<3; ++k)
                 {
                     float p = cell.probs[k];
-                    if (p > 1e-6f) 
+                    if (p > 1e-6f)
                     { // 避免 log(0)
                         entropy -= p * std::log(p);
                     }
@@ -376,16 +376,16 @@ private:
                 // Assuming cloud.merged_probs follows: [0:Road, 1:Plant, 2:Building] ? Or whatever upstream sends.
                 // Assuming upstream sends: [Road, Plant, Building]
                 // We want to publish:      [Road, Building, Plant]
-                
+
                 // Input (cell.probs) assumed: [0]=Road, [1]=Plant, [2]=Building
                 // Output (Vec4f) requested:   [0]=Road, [1]=Building, [2]=Plant
-                
+
                 canvas_probs.at<cv::Vec4f>(local_v, local_u) = cv::Vec4f(
                     cell.probs[0], // Road
                     cell.probs[2], // Building (was index 2 in struct assumption, wait... let's check struct)
                     cell.probs[1], // Plant (was index 1)
                     entropy_norm
-                ); 
+                );
             }
         }
 
@@ -393,7 +393,7 @@ private:
         double angle_deg = 90.0 - (cur_yaw_ * 180.0 / M_PI);
         cv::Point2f center(sr, sr);
         cv::Mat rot_mat = cv::getRotationMatrix2D(center, angle_deg, 1.0);
-        
+
         rot_mat.at<double>(0, 2) += (hs - sr);
         rot_mat.at<double>(1, 2) += (hs - sr);
 
@@ -407,19 +407,19 @@ private:
         // 发布概率图
         std_msgs::Header header;
         header.stamp = ros::Time::now();
-        header.frame_id = "base_link"; 
-        
+        header.frame_id = "base_link";
+
         // Use TYPE_32FC4
         pub_probs_.publish(cv_bridge::CvImage(header, sensor_msgs::image_encodings::TYPE_32FC4, img_probs_final).toImageMsg());
 
         // 5. 可视化 (用于调试监控)
         std::vector<cv::Mat> display_list;
-        
+
         // 分离通道进行显示
         std::vector<cv::Mat> probs_channels;
         cv::split(img_probs_final, probs_channels);
-        
-        for (int i = 0; i < num_classes_ && i < 3; ++i) 
+
+        for (int i = 0; i < num_classes_ && i < 3; ++i)
         {
              cv::Mat heat_map, norm_img;
              // 1. 0-1 float to 0-255 uchar
@@ -436,11 +436,11 @@ private:
         if (probs_channels.size() > 3) {
             cv::Mat entropy_heat, entropy_norm_img;
             probs_channels[3].convertTo(entropy_norm_img, CV_8UC1, 255.0);
-            
+
             // 熵通常不需要太花哨，但如果想保持一致也可以用 JET
             // 或者用 TURBO / INFERNO 等看起来更“现代”的
             cv::applyColorMap(entropy_norm_img, entropy_heat, cv::COLORMAP_JET);
-            
+
             // 熵的通道用不同的颜色（例如红色文字）标识
             cv::putText(entropy_heat, "Norm Entropy", cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 1);
             display_list.push_back(entropy_heat);
@@ -450,11 +450,11 @@ private:
         if (!display_list.empty()) {
             cv::Mat combined;
             cv::hconcat(display_list, combined);
-            
+
             if (combined.cols > 1920) {
                 cv::resize(combined, combined, cv::Size(), 0.75, 0.75);
             }
-            
+
             cv::namedWindow("BEV Probs Monitor", cv::WINDOW_NORMAL);
             cv::imshow("BEV Probs Monitor", combined);
             cv::waitKey(1);

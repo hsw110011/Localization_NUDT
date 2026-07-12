@@ -8,14 +8,14 @@
 
 struct SatelliteData; // Forward declaration
 
-class CoordConverter 
+class CoordConverter
 {
 public:
 
-    
+
     // 新增：直接使用 SatelliteData 构造
     CoordConverter(const SatelliteData& map_data);
-   
+
     // WGS84 <-> UTM（保留 Gauss 命名以兼容历史接口）
     GaussPoint wgs84_to_gauss(double lon, double lat);
     BLH_Point gauss_to_wgs84(double gauss_x, double gauss_y);

@@ -9,27 +9,27 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
     try {
         // 1. 加载整个压缩包
         std::map<std::string, cnpy::NpyArray> arrays = cnpy::npz_load(npz_path);
-        
+
         // 2. 读取 Semantic Map (H, W, 4)
-        if (arrays.count("semantic_map")) 
+        if (arrays.count("semantic_map"))
         {
             cnpy::NpyArray& arr = arrays["semantic_map"];
             int h = arr.shape[0];
             int w = arr.shape[1];
             int c = arr.shape.size() > 2 ? arr.shape[2] : 1;
-            
+
             // 根据数据类型构造 Mat
             if (arr.word_size == 1) // uint8
-            { 
+            {
                 out_data.semantic_map = cv::Mat(h, w, CV_8UC(c));
                 memcpy(out_data.semantic_map.data, arr.data<unsigned char>(), arr.num_bytes());
-            } 
+            }
             else if (arr.word_size == 4) // float32
-            { 
+            {
                 out_data.semantic_map = cv::Mat(h, w, CV_32FC(c));
                 memcpy(out_data.semantic_map.data, arr.data<float>(), arr.num_bytes());
-            } 
-            else 
+            }
+            else
             {
                 std::cout << "[Warning] semantic_map unknown dtype size: " << arr.word_size << std::endl;
             }
@@ -43,15 +43,15 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
             int h = arr.shape[0];
             int w = arr.shape[1];
             int c = arr.shape.size() > 2 ? arr.shape[2] : 1;
-            
+
             // TDF 通常是 float
-            out_data.tdf_map = cv::Mat(h, w, CV_32FC(c)); 
-            if (arr.word_size == 4) 
+            out_data.tdf_map = cv::Mat(h, w, CV_32FC(c));
+            if (arr.word_size == 4)
             {
                 memcpy(out_data.tdf_map.data, arr.data<float>(), arr.num_bytes());
             }
             else if (arr.word_size == 8) // double
-            { 
+            {
                  // OpenCV 默认常用 float32 处理数据，如果源是非常高精度 double，可能需要转 CV_64F
                  cv::Mat temp(h, w, CV_64FC(c));
                  memcpy(temp.data, arr.data<double>(), arr.num_bytes());
@@ -61,23 +61,23 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
         }
 
         // 4. 读取 Geo Bounds
-        if (arrays.count("geo_bounds")) 
+        if (arrays.count("geo_bounds"))
         {
             cnpy::NpyArray& arr = arrays["geo_bounds"];
             size_t num = arr.shape[0]; // 应该是一维数组
             out_data.geo_bounds.resize(num);
-            
+
             if (arr.word_size == 8) // double
-            { 
+            {
                 double* data = arr.data<double>();
                 for(size_t i=0; i<num; i++) out_data.geo_bounds[i] = data[i];
-            } 
+            }
             else if (arr.word_size == 4)  // float
             {
                 float* data = arr.data<float>();
                 for(size_t i=0; i<num; i++) out_data.geo_bounds[i] = (double)data[i];
             }
-            
+
             std::cout << "[Info] Loaded geo_bounds: [";
             for(auto v : out_data.geo_bounds) std::cout << v << " ";
             std::cout << "]" << std::endl;
@@ -121,20 +121,20 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
         }
 
         // 9. 读取 Satellite Map (H, W, 3) - RGB/BGR
-        if (arrays.count("satellite_map")) 
+        if (arrays.count("satellite_map"))
         {
             cnpy::NpyArray& arr = arrays["satellite_map"];
             int h = arr.shape[0];
             int w = arr.shape[1];
             int c = arr.shape.size() > 2 ? arr.shape[2] : 1;
-            
+
             // 卫星图通常是 uint8 BGR
             if (arr.word_size == 1) // uint8
-            { 
+            {
                 out_data.satellite_map = cv::Mat(h, w, CV_8UC(c));
                 memcpy(out_data.satellite_map.data, arr.data<unsigned char>(), arr.num_bytes());
-            } 
-            else 
+            }
+            else
             {
                 std::cout << "[Warning] satellite_map unknown dtype size: " << arr.word_size << std::endl;
             }
@@ -144,8 +144,8 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
         out_data.is_valid = !out_data.semantic_map.empty();
         return true;
 
-    } 
-    catch (const std::exception& e) 
+    }
+    catch (const std::exception& e)
     {
         std::cerr << "[Error] Load NPZ failed: " << e.what() << std::endl;
         return false;
@@ -157,7 +157,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
 double3D Tool::GetBase(const nav_msgs::Odometry *odom , WORLD_POINT globalpoint)
 {
     double3D base;
-    
+
     double siny_cosp = 2.0 * (odom->pose.pose.orientation.w * odom->pose.pose.orientation.z + odom->pose.pose.orientation.x * odom->pose.pose.orientation.y);
     double cosy_cosp = 1.0 - 2.0 * (odom->pose.pose.orientation.y * odom->pose.pose.orientation.y + odom->pose.pose.orientation.z * odom->pose.pose.orientation.z);
     double odom_heading = atan2(siny_cosp, cosy_cosp) * RAD_TO_DEG; // CCW,
@@ -177,7 +177,7 @@ WORLD_POINT Tool::LocalToGlobal(const nav_msgs::Odometry *odom,double3D BasePoin
 {
     WORLD_POINT global_point;
     global_point.timeflag = odom->header.stamp.toSec() * 1000.0;
-    
+
     double siny_cosp = 2.0 * (odom->pose.pose.orientation.w * odom->pose.pose.orientation.z + odom->pose.pose.orientation.x * odom->pose.pose.orientation.y);
     double cosy_cosp = 1.0 - 2.0 * (odom->pose.pose.orientation.y * odom->pose.pose.orientation.y + odom->pose.pose.orientation.z * odom->pose.pose.orientation.z);
     double odom_heading = atan2(siny_cosp, cosy_cosp) * RAD_TO_DEG;
@@ -192,9 +192,9 @@ WORLD_POINT Tool::LocalToGlobal(const nav_msgs::Odometry *odom,double3D BasePoin
     // 2. Transform Heading
     // Global_Math (CCW) = Local_Math (CCW) + Theta (CCW)
     double global_math_heading = odom_heading + (BasePoint.theta)*RAD_TO_DEG;
-    
+
     global_point.heading = global_math_heading;
-    
+
     // Normalize to 0-360
     while(global_point.heading < 0) global_point.heading += 360.0;
     while(global_point.heading >= 360.0) global_point.heading -= 360.0;

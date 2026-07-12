@@ -2,10 +2,11 @@
 """DSM-BEV score GPU batch 计算 — 公式与 dsm_bev_score.py 一致，不修改原语义。"""
 
 import torch
+import torch.nn.functional as F
 
 import numpy as np
 
-from .dsm_bev_score import DsmBevScoreConfig, compute_h_max, erode_obs_mask
+from .dsm_bev_score import DsmBevScoreConfig, compute_h_max
 
 
 def _huber_torch(error, delta):
@@ -53,11 +54,16 @@ def _weighted_mean_batch(values, weights, mask, eps):
 
 
 def _erode_mask_torch(mask, pixels, device):
-    """mask [H,W] bool -> [H,W] bool，复用 numpy erode_obs_mask 语义。"""
+    """mask [H,W] bool -> [H,W] bool，3x3 二值腐蚀，保持在 GPU/torch 上。"""
     if int(pixels) <= 0:
         return mask.to(device=device)
-    m_np = erode_obs_mask(mask.detach().cpu().numpy(), int(pixels))
-    return torch.from_numpy(m_np).to(device=device)
+    out = mask.to(device=device, dtype=torch.bool)
+    for _ in range(int(pixels)):
+        invalid = (~out).to(dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        invalid = F.pad(invalid, (1, 1, 1, 1), mode="constant", value=1.0)
+        has_invalid_neighbor = F.max_pool2d(invalid, kernel_size=3, stride=1).squeeze(0).squeeze(0)
+        out = has_invalid_neighbor <= 0.0
+    return out
 
 
 def lidar_layers_to_torch(lidar_layers, device):
@@ -101,8 +107,7 @@ def compute_dsm_bev_score_batch(
         raise ValueError("batch layer shape mismatch for DSM-BEV score")
 
     m_obs = torch.isfinite(M_obs) & (M_obs > 0.5)
-    valid_pixel_num = int(m_obs.sum().item())
-    if valid_pixel_num == 0 or n == 0:
+    if n == 0:
         zeros = torch.zeros(n, device=device, dtype=torch.float32)
         ones = torch.ones(n, device=device, dtype=torch.float32)
         return {

@@ -3,7 +3,6 @@
 #include "ros/ros.h"
 #include "self_state/GlobalPose.h"
 #include "self_state/LocalPose.h"
-#include "self_state/GlobalPose.h"
 #include "self_state/LidarLocalPose.h"
 #include "nav_msgs/Odometry.h"
 #include "sensor_msgs/Image.h"
@@ -14,7 +13,6 @@
 #include "world_state/SemanticMap.h"
 #include "world_state/TerrainMap.h"
 #include "world_state/SimilarityMap.h"
-#include "self_state/LocalPose.h"
 #include "behavior/ReferencePath.h"
 
 #include <opencv2/core/core.hpp>
@@ -88,7 +86,7 @@ struct InputData{
     self_state::LocalPose  *LocalPose;
     self_state::LidarLocalPose *LidarLocalPose;
     behavior::ReferencePath *ReferencePath;
-    
+
     // New inputs
     nav_msgs::Odometry *Odom;
     sensor_msgs::Image *BevMasks;
@@ -108,7 +106,7 @@ struct InputData{
     bool TerrainMap_refreshflag;
     bool EntityMap_refreshflag;
     bool ReferencePath_refreshflag;
-    
+
     // New refresh flags
     bool Odom_refreshflag;
     bool BevMasks_refreshflag;

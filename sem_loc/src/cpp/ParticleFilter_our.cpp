@@ -8,17 +8,17 @@
 
 using namespace torch::indexing;
 
-ParticleFilter::ParticleFilter(int num_particles) : num_particles_(num_particles), device_(torch::kCUDA) 
+ParticleFilter::ParticleFilter(int num_particles) : num_particles_(num_particles), device_(torch::kCUDA)
 {
-    if (!torch::cuda::is_available()) 
+    if (!torch::cuda::is_available())
     {
         std::cerr << "[ParticleFilter] Warning: CUDA not available. Running on CPU!" << std::endl;
         device_ = torch::kCPU;
     }
 }
 
-void ParticleFilter::Init(const SatelliteData& map_data, 
-                          double init_x, double init_y, double init_theta, 
+void ParticleFilter::Init(const SatelliteData& map_data,
+                          double init_x, double init_y, double init_theta,
                           double std_x, double std_y, double std_theta)
 {
     converter_ = std::make_shared<CoordConverter>(map_data);
@@ -27,8 +27,8 @@ void ParticleFilter::Init(const SatelliteData& map_data,
 
     // 地图数据转 Tensor
     cv::Mat tdf_float;
-    map_data.tdf_map.convertTo(tdf_float, CV_32F); 
-    int channels = tdf_float.channels(); 
+    map_data.tdf_map.convertTo(tdf_float, CV_32F);
+    int channels = tdf_float.channels();
 
     torch::Tensor tdf_cpu = torch::from_blob(tdf_float.data, {map_rows_, map_cols_, channels}, torch::kFloat);
     global_tdf_ = tdf_cpu.permute({2, 0, 1}).unsqueeze(0).to(device_).clone();  //(1, C, H, W)
@@ -132,35 +132,35 @@ void ParticleFilter::Predict(double local_dx, double local_dy, double dtheta)
 
 torch::Tensor ParticleFilter::ComputeAffineMatrices()
 {
-    int view_size = obs_size_;    
+    int view_size = obs_size_;
     int half_size = view_size / 2;
-    
+
     // 1. 生成局部网格 (Image Coords, y axis down)
-    auto y_range = torch::arange(-half_size, half_size, device_); 
+    auto y_range = torch::arange(-half_size, half_size, device_);
     auto x_range = torch::arange(-half_size, half_size, device_);
     auto grid_pair = torch::meshgrid({y_range, x_range}, "ij");
-    auto grid_y = grid_pair[0]; 
-    auto grid_x = grid_pair[1]; 
+    auto grid_y = grid_pair[0];
+    auto grid_x = grid_pair[1];
 
     // 2. 获取粒子状态 (ROS Coords)
-    auto px = particles_.index({Slice(), 0});    
-    auto py = particles_.index({Slice(), 1});    
-    auto theta = particles_.index({Slice(), 2}); 
+    auto px = particles_.index({Slice(), 0});
+    auto py = particles_.index({Slice(), 1});
+    auto theta = particles_.index({Slice(), 2});
 
-    auto blh_pair = converter_->gauss_to_wgs84_gpu(px, py); 
+    auto blh_pair = converter_->gauss_to_wgs84_gpu(px, py);
     auto pixel_pair = converter_->wgs84_to_pixel_gpu(blh_pair.first, blh_pair.second);
 
     torch::Tensor cx = pixel_pair.first;  // 直接使用，不要重新 from_blob
     torch::Tensor cy = pixel_pair.second;
 
-    auto theta_rot = (90-theta)*DEG_TO_RAD;     //90 - 朝向角 
+    auto theta_rot = (90-theta)*DEG_TO_RAD;     //90 - 朝向角
     auto cos_t = torch::cos(theta_rot).view({-1, 1, 1});
     auto sin_t = torch::sin(theta_rot).view({-1, 1, 1});
 
     auto grid_x_batch = grid_x.unsqueeze(0);
     auto grid_y_batch = grid_y.unsqueeze(0);
     auto cx_batch = cx.view({-1, 1, 1});
-    auto cy_batch = cy.view({-1, 1, 1}); 
+    auto cy_batch = cy.view({-1, 1, 1});
 
     // X_src = X_grid * cos - Y_grid * sin + cx
     // Y_src = X_grid * sin + Y_grid * cos + cy
@@ -189,27 +189,27 @@ torch::Tensor ParticleFilter::ComputeAffineMatrices()
 //     // 1. 数据准备 (保持不变)
 //     // ==================================================================================
 //     // (1, 4, H, W)
-//     auto obs_tensor = torch::from_blob((void*)bev_data.data, 
-//                                        {obs_size_, obs_size_, 4}, 
+//     auto obs_tensor = torch::from_blob((void*)bev_data.data,
+//                                        {obs_size_, obs_size_, 4},
 //                                        torch::kFloat)
 //                         .clone().permute({2, 0, 1}).unsqueeze(0).to(device_);
-    
-//     // probs: (1, 3, H, W) 
-//     auto probs = obs_tensor.slice(1, 0, 3); 
-    
+
+//     // probs: (1, 3, H, W)
+//     auto probs = obs_tensor.slice(1, 0, 3);
+
 //     // 【消融实验修改点 1】: 虽然输入里有熵 (slice(1,3,4))，但我们直接忽略它
 //     // auto entropy = obs_tensor.slice(1, 3, 4); // 不再需要
 
 //     // ==================================================================================
 //     // 2. 构建"纯概率权重" (Probability-Only Weights) - 【消融实验核心】
 //     // ==================================================================================
-    
+
 //     // 逻辑：Weight_c = Prob_c
 //     // 我们假设 reliability = 1.0 (即完全信任概率值)
-    
+
 //     // 直接使用概率作为权重
 //     // (1, 3, H, W)
-//     auto w_conf = probs; 
+//     auto w_conf = probs;
 
 //     // [可选] 为了防止极低概率的背景噪声干扰计算，通常可以加一个极小的阈值
 //     // 但为了保持数学上的纯粹性(Pure Probabilistic)，直接用 raw probs 也是对的。
@@ -218,24 +218,24 @@ torch::Tensor ParticleFilter::ComputeAffineMatrices()
 //     // ==================================================================================
 //     // 3. 全局地图采样 (保持不变)
 //     // ==================================================================================
-//     auto affine_grids = ComputeAffineMatrices(); 
+//     auto affine_grids = ComputeAffineMatrices();
 //     auto map_batch = global_tdf_.expand({num_particles_, -1, -1, -1});
-    
+
 //     // sampled_dist: (N, 3, H, W)
 //     auto sampled_dist = torch::nn::functional::grid_sample(
-//         map_batch, affine_grids, 
+//         map_batch, affine_grids,
 //         torch::nn::functional::GridSampleFuncOptions()
 //             .mode(torch::kBilinear).padding_mode(torch::kBorder).align_corners(true));
 
 //     // ==================================================================================
 //     // 4. 计算加权均方误差 (Weighted MSE) - 【逻辑保持一致】
 //     // ==================================================================================
-    
+
 //     // 公式: J = Sum(Prob * Dist^2) / Sum(Prob)
-    
+
 //     // A. 分子
-//     auto dist_sq = sampled_dist.pow(2); 
-//     auto weighted_sse = (dist_sq * w_conf).sum({1, 2, 3}); // (N) 
+//     auto dist_sq = sampled_dist.pow(2);
+//     auto weighted_sse = (dist_sq * w_conf).sum({1, 2, 3}); // (N)
 
 //     // B. 分母
 //     // 这里计算的是图像中所有类别的"总概率质量" (Total Probability Mass)
@@ -243,7 +243,7 @@ torch::Tensor ParticleFilter::ComputeAffineMatrices()
 
 //     float weight_sum_val = total_weight.item<float>();
 //     if (weight_sum_val < 1e-6) {
-//         return; 
+//         return;
 //     }
 
 //     // C. Cost
@@ -468,12 +468,12 @@ std::vector<double> ParticleFilter::EstimatePose()
 
     auto mean_x = (particles_.index({Slice(), 0}) * w).sum().item<double>();
     auto mean_y = (particles_.index({Slice(), 1}) * w).sum().item<double>();
-    
+
     // 圆形均值 (circular mean) 处理角度环绕
     auto theta = particles_.index({Slice(), 2}); // deg
     auto theta_rad = theta * DEG_TO_RAD;
-    
-    auto mean_theta_rad = std::atan2((torch::sin(theta_rad) * w).sum().item<double>(), 
+
+    auto mean_theta_rad = std::atan2((torch::sin(theta_rad) * w).sum().item<double>(),
                                      (torch::cos(theta_rad) * w).sum().item<double>());
 
 
@@ -488,7 +488,7 @@ double ParticleFilter::GetNeff() const
 }
 
 // 辅助函数：将 0-1 的归一化权重转换为 BGR 颜色 (Jet Colormap)
-cv::Scalar GetColorFromWeight(float val) 
+cv::Scalar GetColorFromWeight(float val)
 {
     // 限制范围在 [0, 1]
     val = std::max(0.0f, std::min(1.0f, val));
@@ -522,14 +522,14 @@ std::vector<ParticleFilter::ParticleState> ParticleFilter::GetRawParticles()
     torch::NoGradGuard no_grad;
 
     // 移动到 CPU 并转为 Double
-    auto p_cpu = particles_.to(torch::kFloat64).cpu(); 
+    auto p_cpu = particles_.to(torch::kFloat64).cpu();
     auto w_cpu = weights_.to(torch::kFloat64).cpu();
-    
+
     // 使用 accessor 访问效率更高
     auto p_data = p_cpu.accessor<double, 2>();
     auto w_data = w_cpu.accessor<double, 1>();
-    
-    for(int i = 0; i < num_particles_; ++i) 
+
+    for(int i = 0; i < num_particles_; ++i)
     {
         ParticleState p;
         p.x = p_data[i][0];

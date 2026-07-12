@@ -8,17 +8,17 @@
 
 using namespace torch::indexing;
 
-ParticleFilter::ParticleFilter(int num_particles) : num_particles_(num_particles), device_(torch::kCUDA) 
+ParticleFilter::ParticleFilter(int num_particles) : num_particles_(num_particles), device_(torch::kCUDA)
 {
-    if (!torch::cuda::is_available()) 
+    if (!torch::cuda::is_available())
     {
         std::cerr << "[ParticleFilter] Warning: CUDA not available. Running on CPU!" << std::endl;
         device_ = torch::kCPU;
     }
 }
 
-void ParticleFilter::Init(const SatelliteData& map_data, 
-                          double init_x, double init_y, double init_theta, 
+void ParticleFilter::Init(const SatelliteData& map_data,
+                          double init_x, double init_y, double init_theta,
                           double std_x, double std_y, double std_theta)
 {
     converter_ = std::make_shared<CoordConverter>(map_data);
@@ -27,8 +27,8 @@ void ParticleFilter::Init(const SatelliteData& map_data,
 
     // 地图数据转 Tensor
     cv::Mat tdf_float;
-    map_data.tdf_map.convertTo(tdf_float, CV_32F); 
-    int channels = tdf_float.channels(); 
+    map_data.tdf_map.convertTo(tdf_float, CV_32F);
+    int channels = tdf_float.channels();
 
     torch::Tensor tdf_cpu = torch::from_blob(tdf_float.data, {map_rows_, map_cols_, channels}, torch::kFloat);
     global_tdf_ = tdf_cpu.permute({2, 0, 1}).unsqueeze(0).to(device_).clone();  //(1, C, H, W)
@@ -132,35 +132,35 @@ void ParticleFilter::Predict(double local_dx, double local_dy, double dtheta)
 
 torch::Tensor ParticleFilter::ComputeAffineMatrices()
 {
-    int view_size = obs_size_;    
+    int view_size = obs_size_;
     int half_size = view_size / 2;
-    
+
     // 1. 生成局部网格 (Image Coords, y axis down)
-    auto y_range = torch::arange(-half_size, half_size, device_); 
+    auto y_range = torch::arange(-half_size, half_size, device_);
     auto x_range = torch::arange(-half_size, half_size, device_);
     auto grid_pair = torch::meshgrid({y_range, x_range}, "ij");
-    auto grid_y = grid_pair[0]; 
-    auto grid_x = grid_pair[1]; 
+    auto grid_y = grid_pair[0];
+    auto grid_x = grid_pair[1];
 
     // 2. 获取粒子状态 (ROS Coords)
-    auto px = particles_.index({Slice(), 0});    
-    auto py = particles_.index({Slice(), 1});    
-    auto theta = particles_.index({Slice(), 2}); 
+    auto px = particles_.index({Slice(), 0});
+    auto py = particles_.index({Slice(), 1});
+    auto theta = particles_.index({Slice(), 2});
 
-    auto blh_pair = converter_->gauss_to_wgs84_gpu(px, py); 
+    auto blh_pair = converter_->gauss_to_wgs84_gpu(px, py);
     auto pixel_pair = converter_->wgs84_to_pixel_gpu(blh_pair.first, blh_pair.second);
 
     torch::Tensor cx = pixel_pair.first;  // 直接使用，不要重新 from_blob
     torch::Tensor cy = pixel_pair.second;
 
-    auto theta_rot = (90-theta)*DEG_TO_RAD;     //90 - 朝向角 
+    auto theta_rot = (90-theta)*DEG_TO_RAD;     //90 - 朝向角
     auto cos_t = torch::cos(theta_rot).view({-1, 1, 1});
     auto sin_t = torch::sin(theta_rot).view({-1, 1, 1});
 
     auto grid_x_batch = grid_x.unsqueeze(0);
     auto grid_y_batch = grid_y.unsqueeze(0);
     auto cx_batch = cx.view({-1, 1, 1});
-    auto cy_batch = cy.view({-1, 1, 1}); 
+    auto cy_batch = cy.view({-1, 1, 1});
 
     // X_src = X_grid * cos - Y_grid * sin + cx
     // Y_src = X_grid * sin + Y_grid * cos + cy
@@ -187,7 +187,7 @@ void ParticleFilter::Update(const cv::Mat& bev_mask, float sigma_obs)
     if (bev_mask.empty()) return;
     sigma_obs = std::max(sigma_obs, 0.1f);
 
-    if (!weights_.defined() || weights_.numel() != num_particles_) 
+    if (!weights_.defined() || weights_.numel() != num_particles_)
     {
         weights_ = torch::ones({num_particles_},
                     torch::TensorOptions().device(device_).dtype(torch::kFloat32))
@@ -198,16 +198,16 @@ void ParticleFilter::Update(const cv::Mat& bev_mask, float sigma_obs)
     // 1) Obs tensor (1,C,H,W)
     // =========================
     cv::Mat mask_float;
-    if (bev_mask.type() != CV_32F && bev_mask.type() != CV_32FC3) 
+    if (bev_mask.type() != CV_32F && bev_mask.type() != CV_32FC3)
     {
         bev_mask.convertTo(mask_float, CV_32F);
-    } 
-    else 
+    }
+    else
     {
         mask_float = bev_mask;
     }
 
-    if (!mask_float.isContinuous()) 
+    if (!mask_float.isContinuous())
     {
         mask_float = mask_float.clone();
     }
@@ -229,7 +229,7 @@ void ParticleFilter::Update(const cv::Mat& bev_mask, float sigma_obs)
     auto w_conf = mask_tensor;
     auto total_weight = w_conf.sum().clamp_min(1e-6); // scalar
 
-    if (total_weight.item<float>() < 1.0f) 
+    if (total_weight.item<float>() < 1.0f)
     {
         return;
     }
@@ -353,12 +353,12 @@ std::vector<double> ParticleFilter::EstimatePose()
 
     auto mean_x = (particles_.index({Slice(), 0}) * w).sum().item<double>();
     auto mean_y = (particles_.index({Slice(), 1}) * w).sum().item<double>();
-    
+
     // 圆形均值 (circular mean) 处理角度环绕
     auto theta = particles_.index({Slice(), 2}); // deg
     auto theta_rad = theta * DEG_TO_RAD;
-    
-    auto mean_theta_rad = std::atan2((torch::sin(theta_rad) * w).sum().item<double>(), 
+
+    auto mean_theta_rad = std::atan2((torch::sin(theta_rad) * w).sum().item<double>(),
                                      (torch::cos(theta_rad) * w).sum().item<double>());
 
 

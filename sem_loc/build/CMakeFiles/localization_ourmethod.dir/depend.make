@@ -26498,6 +26498,7 @@ CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: ../src/i
 CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: ../src/include/CoordConverter.h
 CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: ../src/include/LocalizationFusion.h
 CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: ../src/include/ParticleFilter_our.h
+CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: ../src/include/ParticleWeightVisualization.h
 CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: ../src/include/Tool.h
 CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/include/ATen/ATen.h
 CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/include/ATen/BlasBackend.h

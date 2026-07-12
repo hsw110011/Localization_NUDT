@@ -112,6 +112,10 @@ function(add_localization_target target_name main_source particle_filter_source)
     ${particle_filter_source}
   )
 
+  target_compile_definitions(${target_name}
+    PRIVATE SEM_LOC_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+  )
+
   target_link_libraries(${target_name}
     ${LOCALIZATION_LINK_LIBS}
   )

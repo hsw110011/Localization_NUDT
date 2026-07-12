@@ -24,6 +24,7 @@ import math
 import os
 import sys
 import time
+import csv
 
 _PKG_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _PKG_ROOT not in sys.path:
@@ -283,6 +284,18 @@ class PythonLocalizationNode(object):
                 os.path.join(os.path.dirname(__file__), "..", pf_debug_dir)
             )
         self.pf_config.debug_dir = pf_debug_dir
+        default_pose_csv_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "output", "pose_compare.csv")
+        )
+        self.save_pose_csv = _param_bool("save_pose_csv", True)
+        self.pose_csv_path = rospy.get_param("~pose_csv_path", default_pose_csv_path)
+        if not os.path.isabs(self.pose_csv_path):
+            self.pose_csv_path = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", self.pose_csv_path)
+            )
+        self.pose_csv_file = None
+        self.pose_csv_writer = None
+        self._init_pose_csv()
 
         if self.show_window and os.name != "nt" and not os.environ.get("DISPLAY"):
             rospy.logwarn("DISPLAY is not set; disabling OpenCV windows.")
@@ -505,14 +518,128 @@ class PythonLocalizationNode(object):
             and pf_estimate is not None
         ):
             return
+        image = pf_estimate.get("weight_vis_image")
         out_path = pf_estimate.get("weight_vis_path")
-        if not out_path:
-            return
-        image = cv2.imread(out_path, cv2.IMREAD_COLOR)
+        if image is None and out_path:
+            image = cv2.imread(out_path, cv2.IMREAD_COLOR)
         if image is None:
-            rospy.logwarn_throttle(5.0, "Failed to read PF weight visualization: %s", out_path)
             return
         _imshow_named(WINDOW_PF_WEIGHT, image)
+
+    def _init_pose_csv(self):
+        if not self.save_pose_csv:
+            return
+        out_dir = os.path.dirname(self.pose_csv_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        try:
+            self.pose_csv_file = open(
+                self.pose_csv_path, "w", newline="", encoding="utf-8"
+            )
+            self.pose_csv_writer = csv.writer(self.pose_csv_file)
+            self.pose_csv_writer.writerow(
+                [
+                    "timestamp",
+                    "odom_x",
+                    "odom_y",
+                    "odom_theta",
+                    "loc_x",
+                    "loc_y",
+                    "loc_theta",
+                    "gps_x",
+                    "gps_y",
+                    "gps_theta",
+                ]
+            )
+            self.pose_csv_file.flush()
+            rospy.on_shutdown(self._close_pose_csv)
+            rospy.loginfo("Pose comparison CSV: %s", self.pose_csv_path)
+        except OSError as exc:
+            self.pose_csv_file = None
+            self.pose_csv_writer = None
+            self.save_pose_csv = False
+            rospy.logwarn("Failed to open pose comparison CSV '%s': %s", self.pose_csv_path, exc)
+
+    def _close_pose_csv(self):
+        if self.pose_csv_file is None:
+            return
+        try:
+            self.pose_csv_file.flush()
+            self.pose_csv_file.close()
+        finally:
+            self.pose_csv_file = None
+            self.pose_csv_writer = None
+
+    @staticmethod
+    def _csv_float(value):
+        if value is None:
+            return ""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if not math.isfinite(v):
+            return ""
+        return "{:.6f}".format(v)
+
+    def _csv_degrees(self, value):
+        try:
+            return self._csv_float(math.degrees(float(value)))
+        except (TypeError, ValueError):
+            return ""
+
+    def _write_pose_csv(self, pf_estimate, timestamp=None):
+        if self.pose_csv_writer is None or pf_estimate is None:
+            return
+
+        stamp = timestamp
+        if stamp is None and self.latest_global_pose is not None:
+            stamp = getattr(self.latest_global_pose, "local_time", None)
+        if stamp is None:
+            stamp = rospy.Time.now().to_sec()
+
+        odom_x = self.odom_gauss_x if self.first_frame_aligned else None
+        odom_y = self.odom_gauss_y if self.first_frame_aligned else None
+        odom_theta = self.odom_theta
+        if self.latest_local_pose is not None and self.local_pose_base is not None:
+            try:
+                _, _, odom_theta = local_pose_gauss_theta(
+                    self.coord_converter,
+                    self.latest_local_pose,
+                    self.local_pose_base,
+                    local_heading_unit=self.local_heading_unit,
+                    local_heading_convention=self.local_heading_convention,
+                )
+            except (KeyError, ValueError, AttributeError):
+                pass
+
+        gps_x = gps_y = gps_theta = None
+        if self.latest_global_pose is not None:
+            try:
+                gps_x, gps_y, gps_theta = global_pose_gauss_theta(
+                    self.coord_converter,
+                    self.latest_global_pose,
+                    heading_unit=self.global_heading_unit,
+                    heading_convention=self.global_heading_convention,
+                )
+            except (KeyError, ValueError, AttributeError):
+                gps_x = gps_y = gps_theta = None
+
+        self.pose_csv_writer.writerow(
+            [
+                self._csv_float(stamp),
+                self._csv_float(odom_x),
+                self._csv_float(odom_y),
+                self._csv_degrees(odom_theta),
+                self._csv_float(pf_estimate.get("x_est")),
+                self._csv_float(pf_estimate.get("y_est")),
+                self._csv_degrees(pf_estimate.get("yaw_est")),
+                self._csv_float(gps_x),
+                self._csv_float(gps_y),
+                self._csv_degrees(gps_theta),
+            ]
+        )
+        self.pose_csv_file.flush()
 
     def _try_update_bev_frame(self):
         need_score = self.enable_dsm_bev_score
@@ -544,6 +671,10 @@ class PythonLocalizationNode(object):
 
         pf_estimate = None
         global_ref = None
+        want_score_view = (
+            (self.show_window and self.show_dsm_bev_score_window)
+            or self.save_dsm_bev_score_debug
+        )
         if need_pf:
             timestamp = None
             if self.latest_global_pose is not None:
@@ -552,6 +683,7 @@ class PythonLocalizationNode(object):
                 pf_estimate = self.pf_runner.on_bev_message(
                     self.latest_bev_msg,
                     lidar_layers=lidar_layers,
+                    h_max=h_max,
                     timestamp=timestamp,
                     template_global_pose=self.latest_global_pose,
                 )
@@ -561,7 +693,17 @@ class PythonLocalizationNode(object):
 
             if pf_estimate is not None:
                 self._show_pf_weight_vis(pf_estimate)
-                if self.latest_global_pose is not None:
+                self._write_pose_csv(pf_estimate, timestamp=timestamp)
+                next_pf_update_count = self.pf_update_count + 1
+                need_pf_log = next_pf_update_count % self.pf_log_every_n == 0
+                need_global_ref = (
+                    self.latest_global_pose is not None
+                    and (
+                        need_pf_log
+                        or (need_score and want_score_view)
+                    )
+                )
+                if need_global_ref:
                     try:
                         g_gauss_x, g_gauss_y, g_theta = global_pose_gauss_theta(
                             self.coord_converter,
@@ -583,12 +725,12 @@ class PythonLocalizationNode(object):
                     except (KeyError, ValueError):
                         global_ref = None
 
-                self.pf_update_count += 1
+                self.pf_update_count = next_pf_update_count
                 pf_msg = pf_estimate.get("pf_msg")
                 if pf_msg is not None and self.pf_pose_pub is not None:
                     self.pf_pose_pub.publish(pf_msg)
 
-                if self.pf_update_count % self.pf_log_every_n == 0:
+                if need_pf_log:
                     g_sc = (
                         float(self._last_global_ref_score)
                         if self._last_global_ref_score is not None
@@ -663,7 +805,9 @@ class PythonLocalizationNode(object):
             or self.dsm_bev_score_count == 0
         )
         use_pf_quad = (
-            pf_estimate is not None
+            need_score
+            and want_score_view
+            and pf_estimate is not None
             and self.latest_global_pose is not None
         )
 

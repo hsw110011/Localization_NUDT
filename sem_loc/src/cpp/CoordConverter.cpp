@@ -49,14 +49,14 @@ CoordConverter::CoordConverter(const SatelliteData& map_data)
 
     tl_gaussX_ = map_data.origin_x;
     tl_gaussY_ = map_data.origin_y;
-    
+
 }
 
 // ==========================================
 // 1. WGS84 <-> UTM 实现（保留 Gauss 命名以兼容历史接口）
 // ==========================================
 
-GaussPoint CoordConverter::wgs84_to_gauss(double lon, double lat) 
+GaussPoint CoordConverter::wgs84_to_gauss(double lon, double lat)
 {
     double lon_rad = lon * DEG_TO_RAD;
     double lat_rad = lat * DEG_TO_RAD;
@@ -65,7 +65,7 @@ GaussPoint CoordConverter::wgs84_to_gauss(double lon, double lat)
     double cm_deg = -180.0 + (zone_num_ * 6.0) - 3.0;
     double cm_rad = cm_deg * DEG_TO_RAD;
 
-    double a = WGS84_A; 
+    double a = WGS84_A;
     double k0 = UTM_SCALE_FACTOR;
     double e2 = e2_;
     double ee = e2 / (1 - e2);
@@ -104,16 +104,16 @@ GaussPoint CoordConverter::wgs84_to_gauss(double lon, double lat)
     return gauss;
 }
 
-BLH_Point CoordConverter::gauss_to_wgs84(double gauss_x, double gauss_y) 
+BLH_Point CoordConverter::gauss_to_wgs84(double gauss_x, double gauss_y)
 {
     double x_val = gauss_x - UTM_FALSE_EASTING;
     double y_val = gauss_y - utm_false_northing_;
-    
+
     double a = WGS84_A;
     double k0 = UTM_SCALE_FACTOR;
     double e2 = e2_;
     double e1 = e1_;
-    
+
     double M = y_val / k0;
     double mu = M / (a * (1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * std::pow(e2, 3) / 256));
 
@@ -140,7 +140,7 @@ BLH_Point CoordConverter::gauss_to_wgs84(double gauss_x, double gauss_y)
 
     // 使用构造时确定的中央经线
     double cm_deg = -180.0 + (zone_num_ * 6.0) - 3.0;
-    
+
     double final_lat = lat_rad * RAD_TO_DEG;
     double final_lon = cm_deg + (lon_rad * RAD_TO_DEG);
     BLH_Point blh;
@@ -196,7 +196,7 @@ BLH_Point CoordConverter::pixel_to_wgs84(double u, double v)
 // ==========================================
 // 1. WGS84 -> Gauss (GPU Tensor版)
 // ==========================================
-std::pair<torch::Tensor, torch::Tensor> CoordConverter::wgs84_to_gauss_gpu(const torch::Tensor& lon, const torch::Tensor& lat) 
+std::pair<torch::Tensor, torch::Tensor> CoordConverter::wgs84_to_gauss_gpu(const torch::Tensor& lon, const torch::Tensor& lat)
 {
     // 确保计算在输入 Tensor 所在的设备上进行
     auto device = lon.device();
@@ -211,7 +211,7 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::wgs84_to_gauss_gpu(const
     const double cm_rad = cm_deg * DEG_TO_RAD;
 
     // 3. 准备参数 (标量会自动广播)
-    double a = WGS84_A; 
+    double a = WGS84_A;
     double k0 = UTM_SCALE_FACTOR;
     double e2 = e2_;
     double ee = e2 / (1.0 - e2);
@@ -265,17 +265,17 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::wgs84_to_gauss_gpu(const
 // ==========================================
 // Gauss -> WGS84 (GPU Tensor版)
 // ==========================================
-std::pair<torch::Tensor, torch::Tensor> CoordConverter::gauss_to_wgs84_gpu(const torch::Tensor& gauss_x, const torch::Tensor& gauss_y) 
+std::pair<torch::Tensor, torch::Tensor> CoordConverter::gauss_to_wgs84_gpu(const torch::Tensor& gauss_x, const torch::Tensor& gauss_y)
 {
     // 去掉 False Easting
     auto x_val = gauss_x - UTM_FALSE_EASTING;
     auto y_val = gauss_y - utm_false_northing_;
-    
+
     double a = WGS84_A;
     double k0 = UTM_SCALE_FACTOR;
     double e2 = e2_;
     double e1 = e1_;
-    
+
     auto M = y_val / k0;
 
     double mu_denom = a * (1.0 - e2 / 4.0 - 3.0 * std::pow(e2, 2) / 64.0 - 5.0 * std::pow(e2, 3) / 256.0);
@@ -291,12 +291,12 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::gauss_to_wgs84_gpu(const
                      c3 * torch::sin(6.0 * mu);
 
     double ee = e2 / (1.0 - e2);
-    
+
     // 三角函数缓存
     auto sin_phi1 = torch::sin(phi1);
     auto cos_phi1 = torch::cos(phi1);
     auto tan_phi1 = torch::tan(phi1);
-    
+
     auto C1 = ee * torch::pow(cos_phi1, 2);
     auto T1 = torch::pow(tan_phi1, 2);
     auto N1 = a / torch::sqrt(1.0 - e2 * torch::pow(sin_phi1, 2));
@@ -321,7 +321,7 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::gauss_to_wgs84_gpu(const
 
     // 使用构造时确定的中央经线 (zone_num_)
     double cm_deg = -180.0 + (zone_num_ * 6.0) - 3.0;
-    
+
     auto final_lat = lat_rad * RAD_TO_DEG;
     auto final_lon = cm_deg + (lon_rad_diff * RAD_TO_DEG);
 
@@ -336,11 +336,11 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::gauss_to_pixel_gpu(const
 {
     // double u = (gauss_x - tl_gaussX_) / res_;
     // double v = (tl_gaussY_ - gauss_y) / res_;
-    
+
     // LibTorch 会自动处理 tensor - scalar 的广播
     auto u = (gauss_x - tl_gaussX_) / res_;
     auto v = (tl_gaussY_ - gauss_y) / res_;
-    
+
     // 如果需要转成 float32 (类似 cv::Point2f)，可以加 .to(torch::kFloat32)
     // 这里保持精度，返回与输入相同的类型
     return {u, v};
@@ -356,7 +356,7 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::pixel_to_gauss_gpu(const
 
     auto gauss_x = tl_gaussX_ + u * res_;
     auto gauss_y = tl_gaussY_ - v * res_;
-    
+
     return {gauss_x, gauss_y};
 }
 

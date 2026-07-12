@@ -5,7 +5,7 @@
 #include "CommonStruct.h"
 #include "CInterface.h"
 
-struct SatelliteData 
+struct SatelliteData
 {
     cv::Mat semantic_map;      // HxWx4 (BGR + ClassID)
     cv::Mat tdf_map;           // HxWxN (Distance fields)
@@ -20,14 +20,14 @@ struct SatelliteData
 };
 
 class Tool
-{ 
+{
 public:
     Tool();
     bool LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data);  //获取卫星数据
 
     double3D GetBase(const nav_msgs::Odometry *odom ,WORLD_POINT Globalpoint);
     WORLD_POINT LocalToGlobal(const nav_msgs::Odometry *odom,double3D BasePoint);
-   
+
 };
 
 

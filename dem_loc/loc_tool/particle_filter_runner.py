@@ -335,6 +335,7 @@ class ParticleFilterRunner(object):
         self,
         bev_msg,
         lidar_layers=None,
+        h_max=None,
         timestamp=None,
         template_global_pose=None,
     ):
@@ -358,7 +359,7 @@ class ParticleFilterRunner(object):
             lidar_layers = parse_lidar_bev_grid_map(bev_msg)
         self.last_lidar_layers = lidar_layers
 
-        estimate = self.pf.observe_and_resample(lidar_layers, timestamp=timestamp)
+        estimate = self.pf.observe_and_resample(lidar_layers, timestamp=timestamp, h_max=h_max)
         self.update_count += 1
         self.pending_propagation = False
 

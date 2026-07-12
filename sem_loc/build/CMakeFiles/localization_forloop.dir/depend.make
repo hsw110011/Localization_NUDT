@@ -26497,6 +26497,7 @@ CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: ../src/inclu
 CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: ../src/include/CoordConverter.h
 CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: ../src/include/LocalizationFusion.h
 CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: ../src/include/ParticleFilter_forloop.h
+CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: ../src/include/ParticleWeightVisualization.h
 CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: ../src/include/Tool.h
 CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/include/ATen/ATen.h
 CMakeFiles/localization_forloop.dir/src/localization_forloop.cpp.o: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/include/ATen/BlasBackend.h

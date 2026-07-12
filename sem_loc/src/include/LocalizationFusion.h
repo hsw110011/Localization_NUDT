@@ -45,14 +45,14 @@
 //         isam_ = std::make_unique<gtsam::ISAM2>(params);
 
 //         Reset();
-        
+
 //         // 默认参数
 //         // 协方差膨胀系数：用于解决 "PF 内部使用了 Odom 导致的双重计算" 问题
 //         // 建议值：1.5 ~ 5.0。越大表示越不完全信任 PF 的协方差。
-//         pf_covariance_inflation_ratio_ = 2.0; 
-        
+//         pf_covariance_inflation_ratio_ = 2.0;
+
 //         // PF 信任阈值：如果 PF 协方差迹(trace)超过此值，认为 PF 失效，不加 Prior
-//         pf_trust_threshold_ = 5.0; 
+//         pf_trust_threshold_ = 5.0;
 
 //         // 里程计噪声 (x, y, theta)
 //         odom_noise_sigma_ << 0.002, 0.002, 0.001; // [m], [m], [rad]
@@ -66,11 +66,11 @@
 //     }
 
 //     // --- 核心处理函数 ---
-//     FusionResult Process(const std::vector<FusionParticle>& particles, const gtsam::Pose2& current_odom_pose) 
+//     FusionResult Process(const std::vector<FusionParticle>& particles, const gtsam::Pose2& current_odom_pose)
 //     {
 //         gtsam::NonlinearFactorGraph graph;
 //         gtsam::Values initial_estimate;
-        
+
 //         // 1. 计算粒子群统计量 (均值 & 协方差)
 //         gtsam::Pose2 pf_mean;
 //         Eigen::Matrix3d pf_cov;
@@ -78,10 +78,10 @@
 //         double pf_cov_trace = pf_cov.trace();
 
 //         // 2. 初始化逻辑 (第一帧)
-//         if (!initialized_) 
+//         if (!initialized_)
 //         {
 //             last_odom_pose_ = current_odom_pose;
-            
+
 //             // 如果 PF 还没有收敛，就用 Odom 初始位姿，否则用 PF
 //             gtsam::Pose2 init_pose = (pf_cov_trace < 100.0) ? pf_mean : current_odom_pose;
 
@@ -118,11 +118,11 @@
 
 //         // 6. [关键] 条件添加 PF 观测 (PriorFactor)
 //         bool use_pf = (pf_cov_trace < pf_trust_threshold_);
-        
+
 //         if (use_pf) {
 //             // 膨胀协方差：因为 PF 包含了 Odom 信息，为了防止 Over-confident，手动放大不确定度
 //             Eigen::Matrix3d inflated_cov = pf_cov * pf_covariance_inflation_ratio_;
-            
+
 //             // 确保协方差正定 (数值稳定性)
 //             inflated_cov += Eigen::Matrix3d::Identity() * 1e-6;
 
@@ -132,7 +132,7 @@
 
 //         // 7. 执行优化 (iSAM2)
 //         isam_->update(graph, initial_estimate);
-        
+
 //         // 8. 获取最新结果
 //         last_estimated_pose_ = isam_->calculateEstimate<gtsam::Pose2>(curr_key);
 
@@ -142,11 +142,11 @@
 //     }
 
 //     // --- 静态工具：粒子群统计 (含角度正确处理) ---
-//     static void ComputeStatistics(const std::vector<FusionParticle>& particles, 
-//                                   gtsam::Pose2& out_mean, 
-//                                   Eigen::Matrix3d& out_cov) 
+//     static void ComputeStatistics(const std::vector<FusionParticle>& particles,
+//                                   gtsam::Pose2& out_mean,
+//                                   Eigen::Matrix3d& out_cov)
 //     {
-//         if (particles.empty()) 
+//         if (particles.empty())
 //         {
 //             out_mean = gtsam::Pose2();
 //             out_cov = Eigen::Matrix3d::Identity() * 100.0;
@@ -158,7 +158,7 @@
 //         double w_cosine = 0.0;
 //         Eigen::Vector2d w_pos(0, 0);
 
-//         for (const auto& p : particles) 
+//         for (const auto& p : particles)
 //         {
 //             sum_w += p.weight;
 //             w_pos.x() += p.weight * p.x;
@@ -177,7 +177,7 @@
 
 //         // 计算协方差
 //         out_cov.setZero();
-//         for (const auto& p : particles) 
+//         for (const auto& p : particles)
 //         {
 //             double w = p.weight / sum_w;
 //             double dx = p.x - mean_x;
@@ -261,25 +261,25 @@ public:
     LocalizationFusion() {
         isam_params_.relinearizeThreshold = 0.1;
         isam_params_.relinearizeSkip = 1;
-        
+
         Reset();
-        
+
         // Odom per-step noise (@10Hz): 应反映 LIO 实际漂移量级
         // 旧值 0.01,0.01,0.0003 导致 GTSAM 几乎 100% 信任里程计
         odom_noise_sigma_ << 0.05, 0.05, 0.003;
-        
+
         // PF 协方差温和膨胀，旧值 5.0 让 PriorFactor 信息量趋近于零
         pf_covariance_inflation_ratio_ = 1.5;
-        
+
         // 粒子群 trace(Cov) 超限 → PF 发散，不添加 PriorFactor
         pf_trust_threshold_ = 50.0;
-        
+
         // Huber 鲁棒核参数 k (Mahalanobis 距离尺度)
         huber_k_ = 1.345;
-        
+
         // 马氏距离平方阈值: 预测 vs PF 偏差过大时拒绝
         mahalanobis_threshold_ = 25.0;
-        
+
         // 滑动窗口大小
         max_graph_keys_ = 200;
     }
@@ -291,11 +291,11 @@ public:
     }
 
     // --- 核心处理函数 (接口完全不变) ---
-    FusionResult Process(const std::vector<FusionParticle>& particles, const gtsam::Pose2& current_odom_pose) 
+    FusionResult Process(const std::vector<FusionParticle>& particles, const gtsam::Pose2& current_odom_pose)
     {
         gtsam::NonlinearFactorGraph graph;
         gtsam::Values initial_estimate;
-        
+
         // 1. 计算统计量
         gtsam::Pose2 pf_mean;
         Eigen::Matrix3d pf_cov;
@@ -384,9 +384,9 @@ public:
     }
 
     // --- 静态工具 (接口不变) ---
-    static void ComputeStatistics(const std::vector<FusionParticle>& particles, 
-                                  gtsam::Pose2& out_mean, 
-                                  Eigen::Matrix3d& out_cov) 
+    static void ComputeStatistics(const std::vector<FusionParticle>& particles,
+                                  gtsam::Pose2& out_mean,
+                                  Eigen::Matrix3d& out_cov)
     {
         if (particles.empty()) {
             out_mean = gtsam::Pose2();
@@ -409,12 +409,12 @@ public:
         if (sum_w < 1e-9) sum_w = 1e-9;
         double mean_x = w_pos.x() / sum_w;
         double mean_y = w_pos.y() / sum_w;
-        double mean_theta = std::atan2(w_sine, w_cosine); 
+        double mean_theta = std::atan2(w_sine, w_cosine);
 
         out_mean = gtsam::Pose2(mean_x, mean_y, mean_theta);
 
         out_cov.setZero();
-        for (const auto& p : particles) 
+        for (const auto& p : particles)
         {
             double w = p.weight / sum_w;
             double dx = p.x - mean_x;

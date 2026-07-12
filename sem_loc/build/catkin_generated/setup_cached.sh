@@ -8,8 +8,8 @@
 
 # modified environment variables
 export CMAKE_PREFIX_PATH="/home/hsw/catkin_ws/program/sem_loc/build/devel:$CMAKE_PREFIX_PATH"
-export LD_LIBRARY_PATH='/home/hsw/catkin_ws/program/sem_loc/build/devel/lib:/home/hsw/catkin_ws/devel/lib:/opt/ros/noetic/lib:/opt/Qt5.14.2/5.14.2/gcc_64/lib:/usr/local/cuda-12.6/lib64:/opt/Qt5.14.2/5.14.2/gcc_64/lib:/usr/local/cuda-12.6/lib64'
-export PATH='/opt/ros/noetic/bin:/home/hsw/miniconda3/envs/torch/bin:/home/hsw/.npm-global/bin:/usr/local/bin:/opt/Qt5.14.2/5.14.2/gcc_64/bin:/usr/local/cuda-12.6/bin:/home/hsw/.config/Code/User/globalStorage/github.copilot-chat/debugCommand:/home/hsw/.config/Code/User/globalStorage/github.copilot-chat/copilotCli:/home/hsw/.local/bin:/home/hsw/.npm-global/bin:/usr/local/bin:/opt/Qt5.14.2/5.14.2/gcc_64/bin:/usr/local/cuda-12.6/bin:/home/hsw/miniconda3/condabin:/home/hsw/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/hsw/.vscode/extensions/ms-python.debugpy-2025.10.0-linux-x64/bundled/scripts/noConfigScripts'
+export LD_LIBRARY_PATH='/home/hsw/catkin_ws/program/sem_loc/build/devel/lib:/home/hsw/catkin_ws/devel/lib:/opt/ros/noetic/lib:/opt/Qt5.14.2/5.14.2/gcc_64/lib:/usr/local/cuda-12.6/lib64'
+export PATH='/opt/ros/noetic/bin:/home/hsw/.npm-global/bin:/home/hsw/.npm-global/bin:/usr/local/bin:/opt/Qt5.14.2/5.14.2/gcc_64/bin:/usr/local/cuda-12.6/bin:/home/hsw/miniconda3/condabin:/home/hsw/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'
 export PKG_CONFIG_PATH="/home/hsw/catkin_ws/program/sem_loc/build/devel/lib/pkgconfig:$PKG_CONFIG_PATH"
 export ROSLISP_PACKAGE_DIRECTORIES="/home/hsw/catkin_ws/program/sem_loc/build/devel/share/common-lisp:$ROSLISP_PACKAGE_DIRECTORIES"
 export ROS_PACKAGE_PATH="/home/hsw/catkin_ws/program/sem_loc:$ROS_PACKAGE_PATH"

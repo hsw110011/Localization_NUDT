@@ -153,7 +153,7 @@ void CInterface::BevMasksCallback(const sensor_msgs::Image::ConstPtr &msg) {
 void CInterface::BevProbsCallback(const sensor_msgs::Image::ConstPtr &msg) {
     *BevProbs = *msg;
     BevProbs_refreshflag = true;
-}   
+}
 
 
 void CInterface::InspvaxCallback(const novatel_msgs::INSPVAX::ConstPtr &msg) {
@@ -182,8 +182,8 @@ bool CInterface::ConvertToLocalData(InputData *input)
     input->BevProbs = BevProbs;
     input->SemanticMap = SemanticMap;
     input->SimilarityMap=SimilarityMap;
-    input->ReferencePath = ReferencePath;   
-    
+    input->ReferencePath = ReferencePath;
+
     // Copy newly collected pointers
     input->Odom = Odom;
     input->BevMasks = BevMasks;

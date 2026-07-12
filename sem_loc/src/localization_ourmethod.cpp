@@ -12,6 +12,7 @@
 #include "Tool.h"
 #include "ParticleFilter_our.h"
 #include "LocalizationFusion.h"
+#include "ParticleWeightVisualization.h"
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
@@ -59,7 +60,7 @@ int main(int argc, char **argv)
     //类对象创建
     ros::NodeHandle nh;
     CInterface interface(nh);
-    InputData input; 
+    InputData input;
     Tool tool_func;
 
     //结构体创建
@@ -78,7 +79,8 @@ int main(int argc, char **argv)
     const double kTemporalSmoothAlpha = 1.0; // 当前帧权重
     bool has_prev_loc_world = false;
     WORLD_POINT prev_loc_world;
-    
+    int pf_weight_vis_frame = 0;
+
     // Gauss 坐标系下的辅助变量（用于 Delta 计算）
     WORLD_POINT last_Odom_World;
     double last_map_heading = 0.0; // 预留变量：Robot heading in Gauss Map Frame
@@ -107,13 +109,15 @@ int main(int argc, char **argv)
     //std::string path ="/home/hsw/catkin_ws/doc/kitti_raw_0930_0033.npz";
     bool npz_loaded = tool_func.LoadSatelliteNpz(path, sat_data);
     CoordConverter converter(sat_data);
-    
+
 
     // =========================
     // 2) 日志输出文件
     // =========================
     // 记录 Odom / GNSS / PF 结果（可扩展 GTSAM）到 CSV
-    std::ofstream csv_file("/home/hsw/catkin_ws/doc/log_1003_0027_ourmethod_E.csv", std::ios::out | std::ios::trunc);
+    const std::string csv_dir = std::string(SEM_LOC_SOURCE_DIR) + "/output";
+    particle_weight_vis::MakeDirRecursive(csv_dir);
+    std::ofstream csv_file(csv_dir + "/pose_compare_ourmethod.csv", std::ios::out | std::ios::trunc);
     if (!csv_file.is_open())
     {
         std::cerr << "Failed to open CSV for logging." << std::endl;
@@ -123,8 +127,8 @@ int main(int argc, char **argv)
     csv_file << "timestamp,"
              << "odom_x,odom_y,odom_theta,"
              << "pf_x,pf_y,pf_theta,"
-             //<< "gtsam_x,gtsam_y,gtsam_theta," 
-             << "gnss_x,gnss_y,gnss_theta" 
+             //<< "gtsam_x,gtsam_y,gtsam_theta,"
+             << "gnss_x,gnss_y,gnss_theta"
              << std::endl;
 
     // =========================
@@ -134,7 +138,7 @@ int main(int argc, char **argv)
     cv::Mat satellite_map = sat_data.satellite_map.clone();
 
     // 用于存储最新因子图融合结果的变量 (循环外定义)
-    LocalizationFusion::FusionResult gtsam_result = {0.0, 0.0, 0.0, {}, true}; 
+    LocalizationFusion::FusionResult gtsam_result = {0.0, 0.0, 0.0, {}, true};
     bool has_gtsam_result = false;
 
 
@@ -142,27 +146,27 @@ int main(int argc, char **argv)
     // =========================
     // 4) NPZ 读取后检查与可视化
     // =========================
-    if (npz_loaded) 
+    if (npz_loaded)
     {
         std::cout << "----- 地图加载成功! ------" << std::endl;
         printf("地图的gauss分辨率 : %.10f\n", sat_data.resolution);
-        printf("地理经纬度(左上--右下): [%.10f, %.10f, %.10f, %.10f]\n", sat_data.geo_bounds[0], sat_data.geo_bounds[1], 
+        printf("地理经纬度(左上--右下): [%.10f, %.10f, %.10f, %.10f]\n", sat_data.geo_bounds[0], sat_data.geo_bounds[1],
                                                                       sat_data.geo_bounds[2], sat_data.geo_bounds[3]);
         std::cout << "==========================" << std::endl;
-        
+
         //--- 语义地图可视化 ---
-        if (!sat_data.semantic_map.empty()) 
+        if (!sat_data.semantic_map.empty())
         {
             std::vector<cv::Mat> splited;
             cv::split(sat_data.semantic_map, splited);
-            
+
             // 显示前三个通道 (Color Img)
             std::vector<cv::Mat> bgr_ch = {splited[0], splited[1], splited[2]};
             cv::Mat bgr;
             cv::merge(bgr_ch, bgr);
             semantic_map = bgr.clone(); // 保存用于后续绘制
-            cv::namedWindow("Check Read - BGR", cv::WINDOW_NORMAL); 
-            cv::resizeWindow("Check Read - BGR", 600, 600); 
+            cv::namedWindow("Check Read - BGR", cv::WINDOW_NORMAL);
+            cv::resizeWindow("Check Read - BGR", 600, 600);
             cv::imshow("Check Read - BGR", bgr);
         }
 
@@ -174,29 +178,29 @@ int main(int argc, char **argv)
             cv::resizeWindow("Check Read - Satellite", 600, 600);
             cv::imshow("Check Read - Satellite", sat_data.satellite_map);
         }
-        
+
         //---  TDF Map 可视化 ---
-        if (!sat_data.tdf_map.empty()) 
+        if (!sat_data.tdf_map.empty())
         {
             std::cout << "[Info] 可视化 TDF 地图..." << std::endl;
             int num_channels = sat_data.tdf_map.channels();
-            
+
             // 如果是多通道的，分离每个通道分别显示
             std::vector<cv::Mat> tdf_channels;
             cv::split(sat_data.tdf_map, tdf_channels);
-            
-            for (size_t i = 0; i < tdf_channels.size(); ++i) 
+
+            for (size_t i = 0; i < tdf_channels.size(); ++i)
             {
                 cv::Mat chan = tdf_channels[i];
                 cv::Mat norm_chan, vis_gray, heatmap;
-                
+
                 // 1. 归一化到 0-255
                 cv::normalize(chan, norm_chan, 0, 255, cv::NORM_MINMAX, CV_8U);
-                
+
                 // 2. 反转亮度 (0/Near=White, Max/Far=Black) - 类似你的Python逻辑
                 // 或者按照你的热力图逻辑: 255 - norm
                 cv::subtract(cv::Scalar(255), norm_chan, vis_gray);
-                
+
                 // 3. 应用热力图
                 cv::applyColorMap(vis_gray, heatmap, cv::COLORMAP_JET);
                 std::string win_name = "Check Read - TDF Class " + std::to_string(i);
@@ -205,10 +209,10 @@ int main(int argc, char **argv)
                 cv::imshow(win_name, heatmap);
             }
         }
-        
-        cv::waitKey(1); 
-    } 
-    else 
+
+        cv::waitKey(1);
+    }
+    else
     {
         std::cerr << "Failed to read data." << std::endl;
     }
@@ -233,7 +237,7 @@ int main(int argc, char **argv)
             GNSS_World.pixel = converter.wgs84_to_pixel(GNSS_World.BLH.Lon, GNSS_World.BLH.Lat);
 
             Odom_World = GNSS_World;    //第一帧时，里程计位置等于GNSS位置
-            last_Odom_World = GNSS_World; 
+            last_Odom_World = GNSS_World;
             Loc_World = GNSS_World;
             prev_loc_world = Loc_World;
             has_prev_loc_world = true;
@@ -246,13 +250,13 @@ int main(int argc, char **argv)
                 2.0 * (q0.w * q0.z + q0.x * q0.y),
                 1.0 - 2.0 * (q0.y * q0.y + q0.z * q0.z));   // rad
             //Test_Point.heading = last_odom_yaw ; // 弧度
-            
-            
+
+
             Base_point = tool_func.GetBase(input.Odom, GNSS_World);   // 得到坐标系转换点（弧度单位）
             pf.Init(sat_data, GNSS_World.gauss.x, GNSS_World.gauss.y, GNSS_World.heading, 4.0, 4.0, 8.0);   // 初始化粒子滤波器
             // 初始化状态（用于下一帧计算增量）
             Init_localization = true;
-            
+
             std::cout << "定位初始化完成" << std::endl;
         }
         else if(input.Odom_refreshflag == true && input.Inspvax_refreshflag == true && Init_localization == true)
@@ -269,7 +273,7 @@ int main(int argc, char **argv)
             Odom_World = tool_func.LocalToGlobal(input.Odom, Base_point);
             Odom_World.BLH = converter.gauss_to_wgs84(Odom_World.gauss.x, Odom_World.gauss.y);
             Odom_World.pixel = converter.wgs84_to_pixel(Odom_World.BLH.Lon, Odom_World.BLH.Lat);
-            
+
             // (5.2.3) 从原始里程计直接提取车体局部增量
             //
             // 里程计话题 /Odometry 给出 odom 坐标系下的累积绝对位姿:
@@ -332,25 +336,26 @@ int main(int argc, char **argv)
             // Odom_World 供可视化/GTSAM/日志使用 (5.2.2 中已计算)
             last_Odom_World = Odom_World;
 
+            bool should_resample = false;
 
-            
+
             // (5.2.5) 观测更新（本文方法）
             // 使用 4 通道概率图（Road/Plant/Building/Entropy）进行 PF 更新：
             // 相比硬标签，减少量化误差并利用语义不确定性信息。
-            if (input.BevProbs != nullptr) 
+            if (input.BevProbs != nullptr)
             {
                 cv_bridge::CvImagePtr cv_ptr;
-                try 
+                try
                 {
                     // 接收 4 通道 32F 数据 (Road, Plant, Building, Entropy)
                     cv_ptr = cv_bridge::toCvCopy(*input.BevProbs, sensor_msgs::image_encodings::TYPE_32FC4);
-                } 
-                catch (cv_bridge::Exception& e) 
+                }
+                catch (cv_bridge::Exception& e)
                 {
                    ROS_ERROR("cv_bridge exception: %s", e.what());
                 }
-              
-                if (cv_ptr && !cv_ptr->image.empty()) 
+
+                if (cv_ptr && !cv_ptr->image.empty())
                 {
                     int cn = cv_ptr->image.channels();
                     if (cn != 4)
@@ -360,29 +365,26 @@ int main(int argc, char **argv)
 
                     cv::Mat bev_data_resized;
                     // 确保是 400x400
-                    if (cv_ptr->image.rows != 400 || cv_ptr->image.cols != 400) 
+                    if (cv_ptr->image.rows != 400 || cv_ptr->image.cols != 400)
                     {
                         // 浮点数概率建议使用双线性插值
                         cv::resize(cv_ptr->image, bev_data_resized, cv::Size(400, 400), 0, 0, cv::INTER_LINEAR);
                         std::cout << "[Info] Resize Probs to 400x400." << std::endl;
-                    } 
+                    }
                     else
                     {
                         bev_data_resized = cv_ptr->image;
                     }
-                    
+
                     // 使用 4 通道的概率图更新粒子
                     std::cout << "====================*************************===================" <<std::endl;
                     pf.Update(bev_data_resized,20); // 观测噪声参数 (可调)
 
-                    // 标准 SIR: 根据有效粒子数自适应重采样 (N_eff < N/2)
-                    if (pf.GetNeff() < 200.0) 
-                    {
-                        pf.Resample();
-                    }
+                    // 标准 SIR: 根据有效粒子数自适应重采样；估计/可视化后再执行。
+                    should_resample = (pf.GetNeff() < 200.0);
                 }
             }
-            
+
             // (5.2.6) 状态估计
             std::vector<double> pf_pose = pf.EstimatePose(); // [x, y, theta]
 
@@ -425,29 +427,42 @@ int main(int argc, char **argv)
 
             // ================== [新增] 因子图融合优化 ==================
             // 1) 获取粒子原始数据（Degrees）
+            double pf_neff_before_resample = pf.GetNeff();
             auto raw_particles = pf.GetRawParticles();
-            
+            particle_weight_vis::SaveAndShowParticleWeightView(
+                sat_data.satellite_map,
+                converter,
+                raw_particles,
+                Loc_World.pixel,
+                pf_weight_vis_frame++,
+                pf_neff_before_resample);
+
             // 2) 准备融合所需数据结构
             std::vector<LocalizationFusion::FusionParticle> fusion_particles;
             fusion_particles.reserve(raw_particles.size());
-            
+
             // 常量转换
-            
-            for(const auto& p : raw_particles) 
+
+            for(const auto& p : raw_particles)
             {
                 fusion_particles.push_back({
-                    p.x, 
-                    p.y, 
+                    p.x,
+                    p.y,
                     p.theta * DEG_TO_RAD, // Degree -> Radian
                     p.weight
                 });
             }
 
+            if (should_resample)
+            {
+                pf.Resample();
+            }
+
             // 3) 准备当前 LIO 里程计位姿（GTSAM Pose2，Radian）
             // 注意: Odom_World.heading 是 Degree
             gtsam::Pose2 current_odom_pose(
-                Odom_World.gauss.x, 
-                Odom_World.gauss.y, 
+                Odom_World.gauss.x,
+                Odom_World.gauss.y,
                 Odom_World.heading * DEG_TO_RAD
             );
 
@@ -455,7 +470,7 @@ int main(int argc, char **argv)
             // 自动处理: 计算粒子协方差 -> 判断可信度 -> 决定是 Prior 修正还是 Odom 推算
             gtsam_result = fusion_optimizer.Process(fusion_particles, current_odom_pose);
             has_gtsam_result = true;
-            
+
             // 5) 输出因子图融合结果
             GTSAM_World.heading = gtsam_result.theta * RAD_TO_DEG;
             while(GTSAM_World.heading > 180) GTSAM_World.heading -= 360;
@@ -470,13 +485,13 @@ int main(int argc, char **argv)
             double err_x = GTSAM_World.gauss.x - GNSS_World.gauss.x;
             double err_y = GTSAM_World.gauss.y - GNSS_World.gauss.y;
             double err_dist = std::sqrt(err_x*err_x + err_y*err_y);
-            
+
             double err_theta = GTSAM_World.heading - GNSS_World.heading;
             while(err_theta > 180) err_theta -= 360;
             while(err_theta < -180) err_theta += 360;
 
             std::string status_str = gtsam_result.is_pure_odom ? "[Fallback LIO]" : "[Fusion (PF)]";
-            std::cout << "[GTSAM] " << status_str 
+            std::cout << "[GTSAM] " << status_str
             << " PosErr: " << std::fixed << std::setprecision(3) << err_dist
             << " m | AngErr: " << std::setprecision(2) << err_theta << " deg"
             << " | Est: (" << GTSAM_World.gauss.x << ", " << GTSAM_World.gauss.y << ", " << GTSAM_World.heading << ")"
@@ -492,9 +507,9 @@ int main(int argc, char **argv)
             double err_theta_result = Loc_World.heading - GNSS_World.heading;
             while(err_theta_result > 180) err_theta_result -= 360;
             while(err_theta_result < -180) err_theta_result += 360;
-            std::cout << "[Running_result] PosErr: " << std::fixed << std::setprecision(3) << err_dist_result 
+            std::cout << "[Running_result] PosErr: " << std::fixed << std::setprecision(3) << err_dist_result
                       << " m | AngErr: " << std::setprecision(2) << err_theta_result << " deg"
-                      << " | Est: (" << Loc_World.gauss.x << ", " << Loc_World.gauss.y << ", " << Loc_World.heading << ")" 
+                      << " | Est: (" << Loc_World.gauss.x << ", " << Loc_World.gauss.y << ", " << Loc_World.heading << ")"
                       << std::endl;
 
             // --- [Debug] 计算里程计定位误差 ---
@@ -506,9 +521,9 @@ int main(int argc, char **argv)
             double err_theta_odometry = Odom_World.heading - GNSS_World.heading;
             while(err_theta_odometry > 180) err_theta_odometry -= 360;
             while(err_theta_odometry < -180) err_theta_odometry += 360;
-            std::cout << "[Running_Odometry] PosErr: " << std::fixed << std::setprecision(3) << err_dist_odometry 
+            std::cout << "[Running_Odometry] PosErr: " << std::fixed << std::setprecision(3) << err_dist_odometry
                       << " m | AngErr: " << std::setprecision(2) << err_theta_odometry << " deg"
-                      << " | Est: (" << Odom_World.gauss.x << ", " << Odom_World.gauss.y << ", " << Odom_World.heading << ")" 
+                      << " | Est: (" << Odom_World.gauss.x << ", " << Odom_World.gauss.y << ", " << Odom_World.heading << ")"
                       << std::endl;
             std::cout << "====================*************************===================" <<std::endl;
 
@@ -564,12 +579,12 @@ int main(int argc, char **argv)
                 // 3. 绘制白色车模 (Ego View)
                 // =====================================================
                 cv::Point center(200, 200);
-                
+
                 // 设置精致尺寸 (宽 14, 长 28)
-                int w = 14; 
+                int w = 14;
                 int h = 28;
                 int r = 4; // 圆角弧度
-                
+
                 // 定义 8 个顶点模拟圆角矩形
                 std::vector<cv::Point> car_poly = {
                     {center.x - w/2 + r, center.y - h/2}, {center.x + w/2 - r, center.y - h/2},
@@ -588,11 +603,11 @@ int main(int argc, char **argv)
                 // 在车头 1/4 处画一条细横线
                 int glass_y = center.y - h/4;
                 cv::line(
-                    local_roi, 
-                    cv::Point(center.x - w/2 + 2, glass_y), 
-                    cv::Point(center.x + w/2 - 2, glass_y), 
-                    cv::Scalar(100, 100, 100), 
-                    2, 
+                    local_roi,
+                    cv::Point(center.x - w/2 + 2, glass_y),
+                    cv::Point(center.x + w/2 - 2, glass_y),
+                    cv::Scalar(100, 100, 100),
+                    2,
                     cv::LINE_AA
                 );
 
@@ -606,7 +621,7 @@ int main(int argc, char **argv)
                 cv::waitKey(1);
             }
         }
-        
+
         cv::circle(satellite_map, Odom_World.pixel, 5, cv::Scalar(0, 0, 0), -1);
         cv::circle(satellite_map, GNSS_World.pixel, 5, cv::Scalar(255, 255, 255), -1);
         cv::circle(satellite_map, Loc_World.pixel, 5, cv::Scalar(0, 255, 255), -1);
@@ -630,7 +645,7 @@ int main(int argc, char **argv)
         cv::Rect legend_rect(legend_x - 15, legend_y - 25, 700, 370);
         legend_rect &= cv::Rect(0, 0, satellite_map.cols, satellite_map.rows);
 
-        if (legend_rect.area() > 0) 
+        if (legend_rect.area() > 0)
         {
             cv::Mat roi = satellite_map(legend_rect);
             cv::Mat color_box(roi.size(), CV_8UC3, cv::Scalar(255, 255, 255)); // 纯白背景
@@ -639,49 +654,49 @@ int main(int argc, char **argv)
         }
 
         // 辅助函数：画一个带粗边框的醒目大圆点
-        auto draw_legend_item = [&](cv::Point center, cv::Scalar fill_color, cv::Scalar border_color, const std::string& text) 
+        auto draw_legend_item = [&](cv::Point center, cv::Scalar fill_color, cv::Scalar border_color, const std::string& text)
         {
             // 1. 画实心圆
             cv::circle(satellite_map, center, circle_radius, fill_color, -1);
             // 2. 画粗边框 (高对比度)
             cv::circle(satellite_map, center, circle_radius, border_color, border_thick);
             // 3. 写字 (垂直居中调整)
-            int text_offset_y = circle_radius / 2 + 2; 
+            int text_offset_y = circle_radius / 2 + 2;
             cv::putText(satellite_map, text, cv::Point(center.x + 35, center.y + text_offset_y),
                         cv::FONT_HERSHEY_SIMPLEX, font_scale, text_color, font_thickness);
         };
 
         // --- 第一项：里程计 (黑色 Odom) ---
         // 黑点，给它加一个【白色粗边框】，保证在任何背景都能看见
-        draw_legend_item(cv::Point(legend_x, legend_y), 
+        draw_legend_item(cv::Point(legend_x, legend_y),
                         cv::Scalar(0, 0, 0),         // 填充黑
                         cv::Scalar(255, 255, 255),   // 边框白
                         "Odom (Fast-LIO)");
 
         // --- 第二项：真值 (白色 GNSS) ---
         // 白点，给它加一个【黑色粗边框】
-        draw_legend_item(cv::Point(legend_x, legend_y + line_gap), 
+        draw_legend_item(cv::Point(legend_x, legend_y + line_gap),
                         cv::Scalar(255, 255, 255),   // 填充白
                         cv::Scalar(0, 0, 0),         // 边框黑
                         "GNSS (Ground Truth)");
 
         // --- 第三项：PF 结果 (黄色) ---
-        draw_legend_item(cv::Point(legend_x, legend_y + line_gap * 2), 
-                        cv::Scalar(0, 255, 255),     
-                        cv::Scalar(0, 0, 0),         
+        draw_legend_item(cv::Point(legend_x, legend_y + line_gap * 2),
+                        cv::Scalar(0, 255, 255),
+                        cv::Scalar(0, 0, 0),
                         "PF Est (Yellow)");
 
         // --- 第四项：GTSAM 结果 (红色) ---
-        draw_legend_item(cv::Point(legend_x, legend_y + line_gap * 3), 
-                        cv::Scalar(0, 0, 255),     
-                        cv::Scalar(0, 0, 0),         
-                        "GTSAM Fused (Red)"); 
+        draw_legend_item(cv::Point(legend_x, legend_y + line_gap * 3),
+                        cv::Scalar(0, 0, 255),
+                        cv::Scalar(0, 0, 0),
+                        "GTSAM Fused (Red)");
 
         // --- 第五项：局部增量累计 (蓝色 Test_Point) ---
-        draw_legend_item(cv::Point(legend_x, legend_y + line_gap * 4), 
-                        cv::Scalar(255, 0, 0),     
-                        cv::Scalar(0, 0, 0),         
-                        "DeltaAccum (Blue)"); 
+        draw_legend_item(cv::Point(legend_x, legend_y + line_gap * 4),
+                        cv::Scalar(255, 0, 0),
+                        cv::Scalar(0, 0, 0),
+                        "DeltaAccum (Blue)");
 
         // -------------------------------------------------
         // 添加图例 结束

@@ -41,7 +41,7 @@ class ParticleFilterConfig(object):
     init_std_yaw: float = 0.10
 
     motion_std_x: float = 0.30  # 平移噪声系数：std_x = coeff * |delta_x| (m)
-    motion_std_y: float = 0.15  # 平移噪声系数：std_y = coeff * |delta_y| (m)
+    motion_std_y: float = 0.15  # 横向噪声系数：std_y = coeff * (|delta_y| + 0.5 * |delta_x|)
     motion_std_yaw: float = 0.004  # std_yaw = coeff * |delta_yaw| (rad)
     stationary_speed_threshold: float = 0.05  # LocalPose.vehicle_speed 低于该值时跳过 PF 更新
     motion_speed_noise_gain: float = 0.10  # 速度噪声放大：std *= 1 + gain * |speed_mps|
@@ -57,9 +57,9 @@ class ParticleFilterConfig(object):
     nan_score_penalty: float = 1e6
     min_valid_weight_sum: float = 1e-12
 
-    # 最终位姿始终用全粒子权重加权平均；elite_top_fraction 仅保留为调试对比。
-    estimate_mode: str = "weighted"
-    elite_top_fraction: float = 0.15
+    # 最终位姿估计模式：weighted=全粒子加权；elite_weighted=分数前若干比例加权。
+    estimate_mode: str = "elite_weighted"
+    elite_top_fraction: float = 0.50
 
     resample_threshold: float = 0.5
     enable_roughening: bool = True
@@ -105,8 +105,8 @@ def load_particle_filter_config(get_param):
         weight_contrast_target_log_range=float(_p("pf_weight_contrast_target_log_range", 3.0)),
         weight_contrast_min_j_spread=float(_p("pf_weight_contrast_min_j_spread", 1e-4)),
         weight_contrast_max_sharpen=float(_p("pf_weight_contrast_max_sharpen", 20.0)),
-        estimate_mode=str(_p("pf_estimate_mode", "weighted")),
-        elite_top_fraction=float(_p("pf_elite_top_fraction", 0.15)),
+        estimate_mode=str(_p("pf_estimate_mode", "elite_weighted")),
+        elite_top_fraction=float(_p("pf_elite_top_fraction", 0.50)),
         nan_score_penalty=float(_p("pf_nan_score_penalty", 1e6)),
         min_valid_weight_sum=float(_p("pf_min_valid_weight_sum", 1e-12)),
         resample_threshold=float(_p("pf_resample_threshold", 0.5)),
@@ -283,11 +283,23 @@ class ParticleFilter(object):
                     ]
                 )
         particle_path = os.path.join(self.pf_config.debug_dir, "pf_particles.csv")
-        if self.pf_config.save_particle_csv and not os.path.isfile(particle_path):
+        if self.pf_config.save_particle_csv and (
+            not os.path.isfile(particle_path) or os.path.getsize(particle_path) == 0
+        ):
             with open(particle_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 writer.writerow(
-                    ["timestamp", "frame_id", "particle_id", "x", "y", "yaw", "score", "weight"]
+                    [
+                        "timestamp",
+                        "frame_id",
+                        "particle_id",
+                        "x",
+                        "y",
+                        "yaw",
+                        "score",
+                        "j_total",
+                        "weight",
+                    ]
                 )
 
     def initialize(self, gauss_x, gauss_y, yaw_rad):
@@ -337,8 +349,11 @@ class ParticleFilter(object):
         if abs(dyaw) > 1e-12:
             self.particles[:, 2] += dyaw
 
-        std_lx = float(cfg.motion_std_x) * abs(dx) * speed_noise_scale
-        std_ly = float(cfg.motion_std_y) * abs(dy) * speed_noise_scale
+        longitudinal_motion = abs(dx)
+        lateral_motion = abs(dy)
+        lateral_motion_with_forward = lateral_motion + 0.5 * longitudinal_motion
+        std_lx = float(cfg.motion_std_x) * longitudinal_motion * speed_noise_scale
+        std_ly = float(cfg.motion_std_y) * lateral_motion_with_forward * speed_noise_scale
         std_yaw = float(cfg.motion_std_yaw) * abs(dyaw) * speed_noise_scale
         if std_lx <= 0.0 and std_ly <= 0.0 and std_yaw <= 0.0:
             self.particles[:, 2] = _normalize_angle(self.particles[:, 2])
@@ -384,15 +399,14 @@ class ParticleFilter(object):
             "stationary_skip": False,
         }
 
-    def _prepare_lidar(self, lidar_layers):
+    def _prepare_lidar(self, lidar_layers, h_max=None):
         self._lidar_torch = lidar_layers_to_torch(lidar_layers, self.device)
-        m_obs = build_obs_mask(lidar_layers["M_obs"])
-        self.h_max = _sanitize_h_max(
-            compute_h_max(lidar_layers["H_L"], m_obs, self.score_config),
-            self.score_config,
-        )
+        if h_max is None:
+            m_obs = build_obs_mask(lidar_layers["M_obs"])
+            h_max = compute_h_max(lidar_layers["H_L"], m_obs, self.score_config)
+        self.h_max = _sanitize_h_max(h_max, self.score_config)
 
-    def _cache_best_vis(self, dsm, h_d, bi):
+    def _cache_best_vis(self, bi):
         idx = int(bi)
         self.last_best_vis = {
             "gauss_x": float(self.particles[idx, 0].item()),
@@ -400,11 +414,6 @@ class ParticleFilter(object):
             "yaw": float(self.particles[idx, 2].item()),
             "score": float(self.scores[idx].item()),
             "J_total": float(self.j_totals[idx].item()),
-            "layers": {
-                "H_rel_surf": h_d[idx].detach().cpu().numpy().astype(np.float32),
-                "G_long_L": dsm["G_long_L"][idx].detach().cpu().numpy().astype(np.float32),
-                "G_lat_L": dsm["G_lat_L"][idx].detach().cpu().numpy().astype(np.float32),
-            },
         }
 
     def _compute_log_weights(self, j_total, score):
@@ -488,11 +497,11 @@ class ParticleFilter(object):
         self.last_weight_debug = debug
         return log_weights
 
-    def update(self, lidar_layers):
+    def update(self, lidar_layers, h_max=None):
         if not self.initialized:
             raise RuntimeError("particle filter not initialized")
 
-        self._prepare_lidar(lidar_layers)
+        self._prepare_lidar(lidar_layers, h_max=h_max)
         lt = self._lidar_torch
         n = int(self.particles.shape[0])
 
@@ -524,19 +533,32 @@ class ParticleFilter(object):
         self.scores = score
 
         best_idx = int(torch.argmax(score).item())
-        self._cache_best_vis(dsm, h_d, best_idx)
+        self._cache_best_vis(best_idx)
 
         cfg = self.pf_config
-        log_weights = self._compute_log_weights(j_total, score)
+        log_likelihood = self._compute_log_weights(j_total, score)
 
-        bad = ~torch.isfinite(log_weights)
+        bad = ~torch.isfinite(log_likelihood)
         if bad.any():
-            log_weights = torch.where(
+            log_likelihood = torch.where(
                 bad,
-                torch.full_like(log_weights, -float(cfg.nan_score_penalty)),
-                log_weights,
+                torch.full_like(log_likelihood, -float(cfg.nan_score_penalty)),
+                log_likelihood,
             )
 
+        prior = torch.nan_to_num(self.weights, nan=0.0, posinf=0.0, neginf=0.0)
+        prior = torch.clamp(prior, min=0.0)
+        if prior.numel() != n:
+            prior = torch.full((n,), 1.0 / max(n, 1), device=self.device)
+        else:
+            prior_sum = prior.sum()
+            if (not torch.isfinite(prior_sum)) or float(prior_sum.item()) <= 1e-12:
+                prior = torch.full((n,), 1.0 / max(n, 1), device=self.device)
+            else:
+                prior = prior / prior_sum
+
+        # 标准 SIR 递推：后验权重 = 上一帧 prior 权重 * 当前观测似然。
+        log_weights = torch.log(torch.clamp(prior, min=1e-12)) + log_likelihood
         log_weights = log_weights - torch.max(log_weights)
         weights = torch.exp(log_weights)
         weight_sum = weights.sum()
@@ -590,21 +612,46 @@ class ParticleFilter(object):
             return self.systematic_resample()
         return False
 
-    def _mean_pose_from_indices(self, indices):
+    def _mean_pose_from_indices(self, indices, weights=None):
         sel = self.particles[indices]
         if sel.shape[0] == 0:
             sel = self.particles
-        x = float(sel[:, 0].mean().item())
-        y = float(sel[:, 1].mean().item())
-        sin_sum = float(torch.sin(sel[:, 2]).mean().item())
-        cos_sum = float(torch.cos(sel[:, 2]).mean().item())
+        if weights is None:
+            w = torch.full(
+                (int(sel.shape[0]),),
+                1.0 / max(int(sel.shape[0]), 1),
+                dtype=torch.float32,
+                device=self.device,
+            )
+        else:
+            w = torch.nan_to_num(weights[indices], nan=0.0, posinf=0.0, neginf=0.0)
+            w = torch.clamp(w, min=0.0)
+            w_sum = torch.sum(w)
+            if (not torch.isfinite(w_sum)) or float(w_sum.item()) <= 1e-12:
+                w = torch.full(
+                    (int(sel.shape[0]),),
+                    1.0 / max(int(sel.shape[0]), 1),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
+            else:
+                w = w / w_sum
+        x = float(torch.sum(w * sel[:, 0]).item())
+        y = float(torch.sum(w * sel[:, 1]).item())
+        sin_sum = float(torch.sum(w * torch.sin(sel[:, 2])).item())
+        cos_sum = float(torch.sum(w * torch.cos(sel[:, 2])).item())
         yaw = float(math.atan2(sin_sum, cos_sum))
         return x, y, yaw
 
     def _elite_indices(self):
         n = int(self.particles.shape[0])
-        k = max(1, int(math.ceil(n * float(self.pf_config.elite_top_fraction))))
-        return torch.topk(self.scores, k, largest=True).indices
+        fraction = min(max(float(self.pf_config.elite_top_fraction), 1e-6), 1.0)
+        k = max(1, int(math.ceil(n * fraction)))
+        if self.pf_config.score_is_cost:
+            metric = torch.nan_to_num(self.j_totals, nan=float("inf"), posinf=float("inf"))
+            return torch.topk(metric, k, largest=False).indices
+        metric = torch.nan_to_num(self.scores, nan=-float("inf"), neginf=-float("inf"))
+        return torch.topk(metric, k, largest=True).indices
 
     def estimate_pose(self):
         w = torch.nan_to_num(self.weights, nan=0.0, posinf=0.0, neginf=0.0)
@@ -622,10 +669,14 @@ class ParticleFilter(object):
         yaw_w = float(math.atan2(sin_w, cos_w))
 
         elite_idx = self._elite_indices()
-        x_e, y_e, yaw_e = self._mean_pose_from_indices(elite_idx)
+        x_e, y_e, yaw_e = self._mean_pose_from_indices(elite_idx, weights=w)
         configured_mode = str(self.pf_config.estimate_mode).strip().lower()
-        mode = "weighted"
-        x_est, y_est, yaw_est = x_w, y_w, yaw_w
+        if configured_mode in ("elite", "top", "top_weighted", "elite_weighted"):
+            mode = "elite_weighted"
+            x_est, y_est, yaw_est = x_e, y_e, yaw_e
+        else:
+            mode = "weighted"
+            x_est, y_est, yaw_est = x_w, y_w, yaw_w
 
         if self.pf_config.score_is_cost:
             finite_j = self.j_totals[torch.isfinite(self.j_totals)]
@@ -704,8 +755,8 @@ class ParticleFilter(object):
             "spread_yaw": spread_yaw,
         }
 
-    def observe_and_resample(self, lidar_layers, timestamp=None):
-        self.update(lidar_layers)
+    def observe_and_resample(self, lidar_layers, timestamp=None, h_max=None):
+        self.update(lidar_layers, h_max=h_max)
         estimate = self.estimate_pose()
         threshold = float(self.pf_config.resample_threshold) * int(self.pf_config.num_particles)
         should_resample = float(estimate["neff"]) < threshold
@@ -783,6 +834,7 @@ class ParticleFilter(object):
             particles = self.particles.detach().cpu().numpy()
             weights = self.weights.detach().cpu().numpy()
             scores = self.scores.detach().cpu().numpy()
+            j_totals = self.j_totals.detach().cpu().numpy()
             with open(particle_path, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 for pid in range(particles.shape[0]):
@@ -795,6 +847,7 @@ class ParticleFilter(object):
                             particles[pid, 1],
                             particles[pid, 2],
                             scores[pid],
+                            j_totals[pid],
                             weights[pid],
                         ]
                     )
@@ -819,7 +872,11 @@ class ParticleFilter(object):
                 estimate,
                 self._weight_vis_output_dir(),
                 timestamp=timestamp,
+                return_image=True,
             )
+            if isinstance(out_path, tuple):
+                out_path, image = out_path
+                estimate["weight_vis_image"] = image
             estimate["weight_vis_path"] = out_path
         except Exception as exc:
             self._weight_vis_failed = True

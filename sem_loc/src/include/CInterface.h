@@ -46,7 +46,7 @@ private:
     ros::Subscriber GlobalPoseSub;
     ros::Subscriber ImgSub;
     ros::Subscriber ReferencePathSub;
-    
+
     // New Subscribers
     ros::Subscriber OdomSub;
     ros::Subscriber BevMasksSub;
@@ -101,7 +101,7 @@ private:
 
     // New Refresh Flags
     bool Odom_refreshflag;
-        
+
     bool BevMasks_refreshflag;
     bool BevProbs_refreshflag;
     bool Inspvax_refreshflag;
