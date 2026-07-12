@@ -19,6 +19,26 @@ def compute_odom_delta_local(local_pose, prev_local_x, prev_local_y):
     return delta_local_x, delta_local_y
 
 
+def extract_local_speed_mps(local_pose):
+    """优先使用 LocalPose.vehicle_speed，缺失时用 speed_x/speed_y 合成。"""
+    try:
+        speed = float(getattr(local_pose, "vehicle_speed"))
+        if math.isfinite(speed):
+            return abs(speed)
+    except (AttributeError, TypeError, ValueError):
+        pass
+
+    try:
+        speed_x = float(getattr(local_pose, "speed_x", 0.0))
+        speed_y = float(getattr(local_pose, "speed_y", 0.0))
+        speed = math.hypot(speed_x, speed_y)
+        if math.isfinite(speed):
+            return abs(speed)
+    except (TypeError, ValueError):
+        pass
+    return 0.0
+
+
 def compute_local_heading_delta_rad(
     local_pose,
     prev_heading_rad,
@@ -129,15 +149,24 @@ def format_pf_frame_log(
             )
 
     if motion is not None:
+        speed_part = ""
+        if "speed_mps" in motion:
+            speed_part = "  speed={:.3f} m/s  scale={:.2f}".format(
+                float(motion.get("speed_mps", 0.0)),
+                float(motion.get("speed_noise_scale", 1.0)),
+            )
+        skip_part = "  stationary_skip=1" if motion.get("stationary_skip", False) else ""
         lines.append(
             "  odom  local=({dx:.3f}, {dy:.3f}) m  dyaw={dyaw:.4f} rad  "
-            "noise_std=({sx:.4f}, {sy:.4f}, {st:.4f})".format(
+            "noise_std=({sx:.4f}, {sy:.4f}, {st:.4f}){speed}{skip}".format(
                 dx=float(motion.get("delta_local_x", 0.0)),
                 dy=float(motion.get("delta_local_y", 0.0)),
                 dyaw=float(motion.get("delta_yaw", 0.0)),
                 sx=float(motion.get("motion_std_lx", 0.0)),
                 sy=float(motion.get("motion_std_ly", 0.0)),
                 st=float(motion.get("motion_std_yaw", 0.0)),
+                speed=speed_part,
+                skip=skip_part,
             )
         )
 
@@ -172,6 +201,12 @@ def format_pf_frame_log(
             "  weights  min={wmin:.2e}  max={wmax:.2e}".format(
                 wmin=float(estimate.get("weight_min", 0.0)),
                 wmax=float(estimate.get("weight_max", 0.0)),
+            ),
+            "  weight_math  mode={wm}  j_scale={js:.3e}  j_spread={jsp:.3e}  log_range={lr:.2f}".format(
+                wm=str(estimate.get("weight_mode", "")),
+                js=float(estimate.get("weight_j_scale", float("nan"))),
+                jsp=float(estimate.get("weight_j_spread", float("nan"))),
+                lr=float(estimate.get("weight_log_range", float("nan"))),
             ),
             "  J_total  [{jmin:.4f}, {jmax:.4f}]  mean={jmean:.4f}".format(
                 jmin=float(estimate.get("J_min", float("nan"))),
@@ -224,6 +259,8 @@ class ParticleFilterRunner(object):
         self.last_delta_yaw = 0.0
         self.update_count = 0
         self.last_lidar_layers = None
+        self.last_speed_mps = 0.0
+        self.stationary = False
 
     def initialize_from_global_pose(self, global_pose):
         gauss_x, gauss_y, theta = global_pose_gauss_theta(
@@ -255,10 +292,38 @@ class ParticleFilterRunner(object):
             local_heading_unit=self.local_heading_unit,
             local_heading_convention=self.local_heading_convention,
         )
+        speed_mps = extract_local_speed_mps(local_pose)
+        self.last_speed_mps = speed_mps
         self.last_delta_local = (delta_local_x, delta_local_y)
         self.last_delta_yaw = float(delta_yaw)
+        stationary = speed_mps <= float(self.pf_config.stationary_speed_threshold)
+        self.stationary = bool(stationary)
+        if stationary:
+            self.prev_local_x = float(local_pose.dr_x)
+            self.prev_local_y = float(local_pose.dr_y)
+            self.prev_local_heading_rad = heading_rad
+            self.pending_propagation = False
+            self.pf.last_motion = {
+                "delta_local_x": delta_local_x,
+                "delta_local_y": delta_local_y,
+                "delta_yaw": delta_yaw,
+                "delta_global_x": 0.0,
+                "delta_global_y": 0.0,
+                "motion_std_lx": 0.0,
+                "motion_std_ly": 0.0,
+                "motion_std_yaw": 0.0,
+                "speed_mps": speed_mps,
+                "speed_noise_scale": 1.0,
+                "stationary_skip": True,
+            }
+            return False
+
         self.pf.propagate(
-            delta_local_x, delta_local_y, self.odom_theta, delta_yaw=delta_yaw
+            delta_local_x,
+            delta_local_y,
+            self.odom_theta,
+            delta_yaw=delta_yaw,
+            speed_mps=speed_mps,
         )
         self.prev_local_x = float(local_pose.dr_x)
         self.prev_local_y = float(local_pose.dr_y)
@@ -274,6 +339,11 @@ class ParticleFilterRunner(object):
         template_global_pose=None,
     ):
         if not self.initialized:
+            return None
+
+        if self.stationary:
+            self.update_count += 1
+            self.pending_propagation = False
             return None
 
         if self.update_count % self.pf_config.pf_update_every_n != 0 and self.update_count > 0:

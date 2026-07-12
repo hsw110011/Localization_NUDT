@@ -1,0 +1,14 @@
+<launch>
+  <arg name="config" default="$(find fast_lio_body_bev_ros1)/config/body_bev.yaml" />
+  <arg name="node_name" default="fast_lio_body_bev" />
+  <arg name="output" default="screen" />
+
+  <rosparam command="load" file="$(arg config)" ns="$(arg node_name)" />
+
+  <node
+    pkg="fast_lio_body_bev_ros1"
+    type="fast_lio_body_bev"
+    name="$(arg node_name)"
+    output="$(arg output)"
+    required="true" />
+</launch>

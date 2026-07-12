@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
-from osgeo import gdal
+from osgeo import gdal, osr
 
 
 DEM_MAP_RESOLUTION_M = 0.2
@@ -65,6 +65,20 @@ def load_dem_tiff(tiff_path, map_resolution_m=DEM_MAP_RESOLUTION_M):
         geotransform = dataset.GetGeoTransform(can_return_null=True)
         if geotransform is None:
             raise RuntimeError("GeoTransform not found in TIFF")
+        if abs(float(geotransform[2])) > 1e-12 or abs(float(geotransform[4])) > 1e-12:
+            raise RuntimeError("rotated GeoTIFF is not supported")
+
+        projection = dataset.GetProjection()
+        spatial_ref = osr.SpatialReference()
+        if not projection or spatial_ref.ImportFromWkt(projection) != 0:
+            raise RuntimeError("GeoTIFF CRS is missing or invalid")
+        if not spatial_ref.IsGeographic():
+            raise RuntimeError("GeoTIFF must use geographic WGS84 coordinates")
+        if (
+            abs(float(spatial_ref.GetSemiMajor()) - 6378137.0) > 1e-3
+            or abs(float(spatial_ref.GetInvFlattening()) - 298.257223563) > 1e-9
+        ):
+            raise RuntimeError("GeoTIFF geographic CRS must use the WGS84 ellipsoid")
 
         out_data.resolution_x = float(geotransform[1])
         out_data.resolution_y = abs(float(geotransform[5]))
@@ -122,9 +136,10 @@ def load_dem_tiff(tiff_path, map_resolution_m=DEM_MAP_RESOLUTION_M):
 
 
 def resample_dem_to_gauss_resolution(dem_data, target_res_m, skip_tolerance=0.01):
-    """Resample the full DEM to a uniform Gauss grid (meters per pixel).
+    """Resample the full DEM to a uniform UTM grid (meters per pixel).
 
     Top-left / bottom-right WGS84 bounds are updated to match the new grid.
+    Historical ``gauss`` names are retained for API compatibility.
     """
     from .coord_converter import CoordConverter
 

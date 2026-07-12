@@ -1,9 +1,15 @@
 #include "CoordConverter.h"
 #include <cmath>
+#include <stdexcept>
 
 
 CoordConverter::CoordConverter(const SatelliteData& map_data)
 {
+    if (map_data.geo_bounds.size() < 4)
+    {
+        throw std::invalid_argument("UTM map geo_bounds must contain four values");
+    }
+
     // 预计算椭球参数
     double f = WGS84_F;
     e2_ = 2 * f - f * f;
@@ -12,10 +18,20 @@ CoordConverter::CoordConverter(const SatelliteData& map_data)
     map_width_ = map_data.satellite_map.cols;
     map_height_ = map_data.satellite_map.rows;
     zone_num_ = map_data.zone_num;
+    if (zone_num_ < 1 || zone_num_ > 60)
+    {
+        throw std::invalid_argument("UTM zone_num must be in [1, 60]");
+    }
     tl_lon_ = map_data.geo_bounds[0];
     tl_lat_ = map_data.geo_bounds[1];
     br_lon_ = map_data.geo_bounds[2];
     br_lat_ = map_data.geo_bounds[3];
+    const double center_lat = 0.5 * (tl_lat_ + br_lat_);
+    if (center_lat < -80.0 || center_lat > 84.0)
+    {
+        throw std::invalid_argument("UTM latitude must be in [-80, 84] degrees");
+    }
+    utm_false_northing_ = center_lat >= 0.0 ? 0.0 : UTM_FALSE_NORTHING_SOUTH;
     res_ = map_data.resolution;
 
 
@@ -24,13 +40,20 @@ CoordConverter::CoordConverter(const SatelliteData& map_data)
     cout << "res_lon_: " << res_lon_ << ", res_lat_: " << res_lat_ << endl;
     GaussPoint gauss_tl = wgs84_to_gauss(tl_lon_, tl_lat_);
 
+    if (std::abs(map_data.origin_x - gauss_tl.x) > UTM_ORIGIN_TOLERANCE_M ||
+        std::abs(map_data.origin_y - gauss_tl.y) > UTM_ORIGIN_TOLERANCE_M)
+    {
+        throw std::invalid_argument(
+            "map Origin_X/Origin_Y are inconsistent with the configured UTM zone");
+    }
+
     tl_gaussX_ = map_data.origin_x;
     tl_gaussY_ = map_data.origin_y;
     
 }
 
 // ==========================================
-// 1. WGS84 <-> Gauss 实现
+// 1. WGS84 <-> UTM 实现（保留 Gauss 命名以兼容历史接口）
 // ==========================================
 
 GaussPoint CoordConverter::wgs84_to_gauss(double lon, double lat) 
@@ -38,11 +61,8 @@ GaussPoint CoordConverter::wgs84_to_gauss(double lon, double lat)
     double lon_rad = lon * DEG_TO_RAD;
     double lat_rad = lat * DEG_TO_RAD;
 
-    // 确定中央经线
-    // 使用类成员变量 zone_num_，确保与地图投影带一致，而不是根据每点的经度动态计算
-    // 这样可以处理跨越投影带边缘的地图（强行投影到同一个带上，保持平面连续性）
-    int zone = int((lon + 180) / 6) + 1; 
-    double cm_deg = -180.0 + (zone * 6.0) - 3.0;
+    // 始终使用地图的固定 UTM 带，避免正向动态分带、反向固定分带。
+    double cm_deg = -180.0 + (zone_num_ * 6.0) - 3.0;
     double cm_rad = cm_deg * DEG_TO_RAD;
 
     double a = WGS84_A; 
@@ -78,22 +98,23 @@ GaussPoint CoordConverter::wgs84_to_gauss(double lon, double lat)
 
     // False Easting
     GaussPoint gauss;
-    gauss.x = x_val + 500000.0;
-    gauss.y = y_val;
+    gauss.x = x_val + UTM_FALSE_EASTING;
+    gauss.y = y_val + utm_false_northing_;
     gauss.z = 0.0;
     return gauss;
 }
 
 BLH_Point CoordConverter::gauss_to_wgs84(double gauss_x, double gauss_y) 
 {
-    double x_val = gauss_x - 500000.0; // 去掉 False Easting
+    double x_val = gauss_x - UTM_FALSE_EASTING;
+    double y_val = gauss_y - utm_false_northing_;
     
     double a = WGS84_A;
     double k0 = UTM_SCALE_FACTOR;
     double e2 = e2_;
     double e1 = e1_;
     
-    double M = gauss_y / k0;
+    double M = y_val / k0;
     double mu = M / (a * (1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * std::pow(e2, 3) / 256));
 
     // 底点纬度 phi1
@@ -185,12 +206,9 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::wgs84_to_gauss_gpu(const
     auto lon_rad = lon * DEG_TO_RAD;
     auto lat_rad = lat * DEG_TO_RAD;
 
-    // 2. 确定中央经线 (Vectorized)
-    // CPU: int zone = int((lon + 180) / 6) + 1;
-    // GPU: 对应 float 操作，使用 floor
-    auto zone = torch::floor((lon + 180.0) / 6.0) + 1.0;
-    auto cm_deg = -180.0 + (zone * 6.0) - 3.0;
-    auto cm_rad = cm_deg * DEG_TO_RAD;
+    // 2. 使用地图的固定 UTM 中央经线，与 CPU 正反转换保持一致。
+    const double cm_deg = -180.0 + (zone_num_ * 6.0) - 3.0;
+    const double cm_rad = cm_deg * DEG_TO_RAD;
 
     // 3. 准备参数 (标量会自动广播)
     double a = WGS84_A; 
@@ -238,8 +256,8 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::wgs84_to_gauss_gpu(const
                                           (61.0 - 58.0 * T + T * T + 600.0 * C - 330.0 * ee) * A6 / 720.0));
 
     // 8. False Easting
-    auto gauss_x = x_val + 500000.0;
-    auto gauss_y = y_val;
+    auto gauss_x = x_val + UTM_FALSE_EASTING;
+    auto gauss_y = y_val + utm_false_northing_;
 
     return {gauss_x, gauss_y};
 }
@@ -250,14 +268,15 @@ std::pair<torch::Tensor, torch::Tensor> CoordConverter::wgs84_to_gauss_gpu(const
 std::pair<torch::Tensor, torch::Tensor> CoordConverter::gauss_to_wgs84_gpu(const torch::Tensor& gauss_x, const torch::Tensor& gauss_y) 
 {
     // 去掉 False Easting
-    auto x_val = gauss_x - 500000.0; 
+    auto x_val = gauss_x - UTM_FALSE_EASTING;
+    auto y_val = gauss_y - utm_false_northing_;
     
     double a = WGS84_A;
     double k0 = UTM_SCALE_FACTOR;
     double e2 = e2_;
     double e1 = e1_;
     
-    auto M = gauss_y / k0;
+    auto M = y_val / k0;
 
     double mu_denom = a * (1.0 - e2 / 4.0 - 3.0 * std::pow(e2, 2) / 64.0 - 5.0 * std::pow(e2, 3) / 256.0);
     auto mu = M / mu_denom;

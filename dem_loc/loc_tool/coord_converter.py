@@ -2,7 +2,11 @@
 """坐标转换 — 对应 C++ PathAnalysis.cpp / Tool.cpp / CoordConverter.cpp。
 
 坐标系:
-    WGS84 (经纬度) <-> 高斯投影 (米) <-> DSM 像素 (u/v)
+    WGS84 (经纬度) <-> UTM (米) <-> DSM 像素 (u/v)
+
+兼容性约定:
+    历史接口中的 ``gauss`` 名称保持不变，但其坐标语义统一为
+    WGS84 / UTM：x=Easting，y=Northing。
 
 主要接口:
     CoordConverter(dem_data)
@@ -23,6 +27,11 @@ from .common_struct import BLH_Point, DEG_TO_RAD, GaussPoint, RAD_TO_DEG, WORLD_
 WGS84_A = 6378137.0
 WGS84_F = 1.0 / 298.257223563
 UTM_SCALE_FACTOR = 0.9996
+UTM_FALSE_EASTING = 500000.0
+UTM_FALSE_NORTHING_SOUTH = 10000000.0
+UTM_MIN_LAT = -80.0
+UTM_MAX_LAT = 84.0
+UTM_INPUT_MARGIN_M = 100.0
 
 
 class PixelPoint(object):
@@ -82,11 +91,19 @@ class CoordConverter(object):
         self.map_width = int(dem_tiff_data.raw_elevation_map.shape[1])
         self.map_height = int(dem_tiff_data.raw_elevation_map.shape[0])
         self.zone_num = int(dem_tiff_data.zone_num)
+        if not 1 <= self.zone_num <= 60:
+            raise ValueError("UTM zone_num must be in [1, 60]")
 
         self.tl_lon = float(dem_tiff_data.geo_bounds[0])
         self.tl_lat = float(dem_tiff_data.geo_bounds[1])
         self.br_lon = float(dem_tiff_data.geo_bounds[2])
         self.br_lat = float(dem_tiff_data.geo_bounds[3])
+        center_lat = 0.5 * (self.tl_lat + self.br_lat)
+        if not UTM_MIN_LAT <= center_lat <= UTM_MAX_LAT:
+            raise ValueError("UTM latitude must be in [-80, 84] degrees")
+        self.utm_false_northing = (
+            0.0 if center_lat >= 0.0 else UTM_FALSE_NORTHING_SOUTH
+        )
 
         self.res_lon = float(dem_tiff_data.resolution_x)
         self.res_lat = float(dem_tiff_data.resolution_y)
@@ -95,6 +112,19 @@ class CoordConverter(object):
         gauss_br = self.wgs84_to_gauss(self.br_lon, self.br_lat)
         self.tl_gauss_x = gauss_tl.x
         self.tl_gauss_y = gauss_tl.y
+        corner_lon = np.asarray(
+            [self.tl_lon, self.br_lon, self.tl_lon, self.br_lon],
+            dtype=np.float64,
+        )
+        corner_lat = np.asarray(
+            [self.tl_lat, self.tl_lat, self.br_lat, self.br_lat],
+            dtype=np.float64,
+        )
+        corner_x, corner_y = self.wgs84_to_gauss_np(corner_lon, corner_lat)
+        self.utm_min_x = float(np.min(corner_x))
+        self.utm_max_x = float(np.max(corner_x))
+        self.utm_min_y = float(np.min(corner_y))
+        self.utm_max_y = float(np.max(corner_y))
         map_res = float(dem_tiff_data.resolution)
         if map_res >= 0.01:
             self.res_gauss_x = map_res
@@ -118,6 +148,18 @@ class CoordConverter(object):
             pixel is not None
             and -margin <= float(pixel.x) < (self.map_width + margin)
             and -margin <= float(pixel.y) < (self.map_height + margin)
+        )
+
+    def is_utm_in_bounds(self, utm_x, utm_y, margin_m=0.0):
+        """检查历史 gauss 字段是否符合当前地图的 UTM 坐标范围。"""
+        if not _finite_pair(utm_x, utm_y):
+            return False
+        margin = float(margin_m)
+        x_value = float(utm_x)
+        y_value = float(utm_y)
+        return (
+            (self.utm_min_x - margin) <= x_value <= (self.utm_max_x + margin)
+            and (self.utm_min_y - margin) <= y_value <= (self.utm_max_y + margin)
         )
 
     def wgs84_to_gauss(self, lon, lat):
@@ -288,16 +330,16 @@ class CoordConverter(object):
         if hasattr(global_point, "gaussX") and hasattr(global_point, "gaussY"):
             gauss_x = float(global_point.gaussX)
             gauss_y = float(global_point.gaussY)
-            if _finite_pair(gauss_x, gauss_y) and not (
-                abs(gauss_x) < 1e-6 and abs(gauss_y) < 1e-6
+            if self.is_utm_in_bounds(
+                gauss_x, gauss_y, margin_m=UTM_INPUT_MARGIN_M
             ):
                 return gauss_x, gauss_y
 
         if hasattr(global_point, "gauss"):
             gauss_x = float(global_point.gauss.x)
             gauss_y = float(global_point.gauss.y)
-            if _finite_pair(gauss_x, gauss_y) and not (
-                abs(gauss_x) < 1e-6 and abs(gauss_y) < 1e-6
+            if self.is_utm_in_bounds(
+                gauss_x, gauss_y, margin_m=UTM_INPUT_MARGIN_M
             ):
                 return gauss_x, gauss_y
 
@@ -311,20 +353,31 @@ class CoordConverter(object):
     ):
         lon = float(getattr(global_point, "longitude", float("nan")))
         lat = float(getattr(global_point, "latitude", float("nan")))
-        if np.isfinite(lon) and np.isfinite(lat):
-            gauss = self.wgs84_to_gauss(lon, lat)
-            gauss_x = gauss.x
-            gauss_y = gauss.y
-        else:
+        gauss_x = float("nan")
+        gauss_y = float("nan")
+        if (
+            np.isfinite(lon)
+            and np.isfinite(lat)
+            and -180.0 <= lon <= 180.0
+            and UTM_MIN_LAT <= lat <= UTM_MAX_LAT
+        ):
+            projected = self.wgs84_to_gauss(lon, lat)
+            if self.is_utm_in_bounds(
+                projected.x, projected.y, margin_m=UTM_INPUT_MARGIN_M
+            ):
+                gauss_x = projected.x
+                gauss_y = projected.y
+
+        if not _finite_pair(gauss_x, gauss_y):
             gauss_xy = self._get_global_pose_gauss_xy(global_point)
             if gauss_xy is None:
                 raise ValueError(
-                    "global_point must provide longitude/latitude or gauss coordinates"
+                    "global_point must provide map-local WGS84 or UTM coordinates"
                 )
             gauss_x, gauss_y = gauss_xy
 
         if not _finite_pair(gauss_x, gauss_y):
-            raise ValueError("global_point must provide longitude/latitude or gauss coordinates")
+            raise ValueError("global_point must provide map-local WGS84 or UTM coordinates")
 
         heading = float(
             getattr(
@@ -407,11 +460,16 @@ class CoordConverter(object):
             )
         )
 
-        return gauss_x + 500000.0, gauss_y
+        return (
+            gauss_x + UTM_FALSE_EASTING,
+            gauss_y + self.utm_false_northing,
+        )
 
     def gauss_to_wgs84_np(self, gauss_x, gauss_y):
-        x_val = np.asarray(gauss_x, dtype=np.float64) - 500000.0
-        y_val = np.asarray(gauss_y, dtype=np.float64)
+        x_val = np.asarray(gauss_x, dtype=np.float64) - UTM_FALSE_EASTING
+        y_val = (
+            np.asarray(gauss_y, dtype=np.float64) - self.utm_false_northing
+        )
 
         a = WGS84_A
         k0 = UTM_SCALE_FACTOR

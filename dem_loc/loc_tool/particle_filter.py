@@ -12,10 +12,21 @@ import torch
 from .dsm_bev_score import DsmBevScoreConfig, build_obs_mask, compute_h_max
 from .dsm_bev_score_batch import compute_dsm_bev_score_batch, lidar_layers_to_torch, _sanitize_h_max
 from .dsm_patch_batch import crop_batch_with_bev_layers
+from .particle_weight_vis import save_particle_weight_view
 
 
 def _normalize_angle(yaw):
     return torch.atan2(torch.sin(yaw), torch.cos(yaw))
+
+
+def _percentile_1d(values, q):
+    values = values.flatten()
+    if values.numel() == 0:
+        return torch.tensor(float("nan"), dtype=torch.float32, device=values.device)
+    sorted_values = torch.sort(values).values
+    idx = int(round((sorted_values.numel() - 1) * float(q)))
+    idx = max(0, min(int(sorted_values.numel()) - 1, idx))
+    return sorted_values[idx]
 
 
 @dataclass
@@ -32,15 +43,22 @@ class ParticleFilterConfig(object):
     motion_std_x: float = 0.30  # 平移噪声系数：std_x = coeff * |delta_x| (m)
     motion_std_y: float = 0.15  # 平移噪声系数：std_y = coeff * |delta_y| (m)
     motion_std_yaw: float = 0.004  # std_yaw = coeff * |delta_yaw| (rad)
+    stationary_speed_threshold: float = 0.05  # LocalPose.vehicle_speed 低于该值时跳过 PF 更新
+    motion_speed_noise_gain: float = 0.10  # 速度噪声放大：std *= 1 + gain * |speed_mps|
 
     score_is_cost: bool = True
     # 组内权重锐度：1.0=仅按 score/max(score)；<1 进一步放大 top 粒子权重
     score_temperature: float = 1.0
+    # 粒子权重区分度模式：absolute=固定 tau*temperature；adaptive=按当前帧 J spread 自适应拉开权重
+    weight_contrast_mode: str = "adaptive"
+    weight_contrast_target_log_range: float = 3.0
+    weight_contrast_min_j_spread: float = 1e-4
+    weight_contrast_max_sharpen: float = 20.0
     nan_score_penalty: float = 1e6
     min_valid_weight_sum: float = 1e-12
 
-    # weighted=全粒子加权平均；elite_mean=取 score 前 elite_top_fraction 粒子位置平均
-    estimate_mode: str = "elite_mean"
+    # 最终位姿始终用全粒子权重加权平均；elite_top_fraction 仅保留为调试对比。
+    estimate_mode: str = "weighted"
     elite_top_fraction: float = 0.15
 
     resample_threshold: float = 0.5
@@ -52,6 +70,9 @@ class ParticleFilterConfig(object):
     save_debug: bool = True
     save_particle_csv: bool = False
     save_score_csv: bool = True
+    save_weight_vis: bool = True
+    weight_vis_every_n: int = 1
+    weight_vis_dir: str = "pf_weight_vis"
     debug_dir: str = "output/particle_filter_debug"
 
     pf_pose_topic: str = "/pf_global_pose"
@@ -76,9 +97,15 @@ def load_particle_filter_config(get_param):
         motion_std_x=float(_p("pf_motion_std_x", 0.30)),
         motion_std_y=float(_p("pf_motion_std_y", 0.15)),
         motion_std_yaw=float(_p("pf_motion_std_yaw", 0.004)),
+        stationary_speed_threshold=float(_p("pf_stationary_speed_threshold", 0.05)),
+        motion_speed_noise_gain=float(_p("pf_motion_speed_noise_gain", 0.10)),
         score_is_cost=bool(_p("pf_score_is_cost", True)),
         score_temperature=float(_p("pf_score_temperature", 1.0)),
-        estimate_mode=str(_p("pf_estimate_mode", "elite_mean")),
+        weight_contrast_mode=str(_p("pf_weight_contrast_mode", "adaptive")),
+        weight_contrast_target_log_range=float(_p("pf_weight_contrast_target_log_range", 3.0)),
+        weight_contrast_min_j_spread=float(_p("pf_weight_contrast_min_j_spread", 1e-4)),
+        weight_contrast_max_sharpen=float(_p("pf_weight_contrast_max_sharpen", 20.0)),
+        estimate_mode=str(_p("pf_estimate_mode", "weighted")),
         elite_top_fraction=float(_p("pf_elite_top_fraction", 0.15)),
         nan_score_penalty=float(_p("pf_nan_score_penalty", 1e6)),
         min_valid_weight_sum=float(_p("pf_min_valid_weight_sum", 1e-12)),
@@ -90,6 +117,9 @@ def load_particle_filter_config(get_param):
         save_debug=bool(_p("pf_save_debug", True)),
         save_particle_csv=bool(_p("pf_save_particle_csv", False)),
         save_score_csv=bool(_p("pf_save_score_csv", True)),
+        save_weight_vis=bool(_p("pf_save_weight_vis", True)),
+        weight_vis_every_n=max(1, int(_p("pf_weight_vis_every_n", 1))),
+        weight_vis_dir=str(_p("pf_weight_vis_dir", "pf_weight_vis")),
         debug_dir=str(_p("pf_debug_dir", "output/particle_filter_debug")),
         pf_pose_topic=str(_p("pf_pose_topic", "/pf_global_pose")),
         pf_update_every_n=max(1, int(_p("pf_update_every_n", 1))),
@@ -119,8 +149,14 @@ def load_particle_filter_ini_defaults(ini_path):
         "motion_std_x": "pf_motion_std_x",
         "motion_std_y": "pf_motion_std_y",
         "motion_std_yaw": "pf_motion_std_yaw",
+        "stationary_speed_threshold": "pf_stationary_speed_threshold",
+        "motion_speed_noise_gain": "pf_motion_speed_noise_gain",
         "score_is_cost": "pf_score_is_cost",
         "score_temperature": "pf_score_temperature",
+        "weight_contrast_mode": "pf_weight_contrast_mode",
+        "weight_contrast_target_log_range": "pf_weight_contrast_target_log_range",
+        "weight_contrast_min_j_spread": "pf_weight_contrast_min_j_spread",
+        "weight_contrast_max_sharpen": "pf_weight_contrast_max_sharpen",
         "estimate_mode": "pf_estimate_mode",
         "elite_top_fraction": "pf_elite_top_fraction",
         "nan_score_penalty": "pf_nan_score_penalty",
@@ -133,6 +169,9 @@ def load_particle_filter_ini_defaults(ini_path):
         "save_debug": "pf_save_debug",
         "save_particle_csv": "pf_save_particle_csv",
         "save_score_csv": "pf_save_score_csv",
+        "save_weight_vis": "pf_save_weight_vis",
+        "weight_vis_every_n": "pf_weight_vis_every_n",
+        "weight_vis_dir": "pf_weight_vis_dir",
         "debug_dir": "pf_debug_dir",
         "pf_pose_topic": "pf_pose_topic",
         "pf_update_every_n": "pf_update_every_n",
@@ -142,6 +181,28 @@ def load_particle_filter_ini_defaults(ini_path):
     for ini_key, param_key in mapping.items():
         if ini_key in section:
             out[param_key] = section.get(ini_key)
+    if parser.has_section("dsm_bev_score"):
+        score_section = parser["dsm_bev_score"]
+        score_mapping = {
+            "alpha_h": "alpha_h",
+            "alpha_gx": "alpha_gx",
+            "alpha_gy": "alpha_gy",
+            "lambda_lidar_higher": "lambda_lidar_higher",
+            "lambda_dsm_higher": "lambda_dsm_higher",
+            "delta_h": "delta_h",
+            "w_h_base": "w_h_base",
+            "w_h_height": "w_h_height",
+            "delta_g": "delta_g",
+            "w_g_base": "w_g_base",
+            "tau": "tau",
+            "grad_cap": "grad_cap",
+            "grad_mask_erode_px": "grad_mask_erode_px",
+            "dsm_long_sign": "dsm_long_sign",
+            "dsm_lat_sign": "dsm_lat_sign",
+        }
+        for ini_key, param_key in score_mapping.items():
+            if ini_key in score_section:
+                out[param_key] = score_section.get(ini_key)
     if parser.has_section("topics") and "pf_pose_topic" in parser["topics"]:
         out["pf_pose_topic"] = parser["topics"].get("pf_pose_topic")
     return out
@@ -181,6 +242,8 @@ class ParticleFilter(object):
         self.last_best_vis = None
         self.last_debug = {}
         self.last_motion = {}
+        self.last_weight_debug = {}
+        self._weight_vis_failed = False
 
         if pf_config.save_debug:
             os.makedirs(pf_config.debug_dir, exist_ok=True)
@@ -209,6 +272,11 @@ class ParticleFilter(object):
                         "resampled",
                         "weight_max",
                         "weight_min",
+                        "weight_mode",
+                        "weight_j_scale",
+                        "weight_j_spread",
+                        "weight_base_scale",
+                        "weight_log_range",
                         "valid_score_count",
                         "cuda_memory_allocated",
                         "cuda_memory_reserved",
@@ -237,13 +305,14 @@ class ParticleFilter(object):
         self.weights.fill_(1.0 / max(n, 1))
         self.scores.zero_()
         self.j_totals.zero_()
+        self.last_weight_debug = {}
         self.initialized = True
         self.frame_id = 0
         self.h_max = None
         self._lidar_torch = None
 
-    def propagate(self, delta_local_x, delta_local_y, odom_theta, delta_yaw=0.0):
-        """里程计位移 + 航向增量传播；运动噪声与 |dx|,|dy|,|d_yaw| 线性成正比。"""
+    def propagate(self, delta_local_x, delta_local_y, odom_theta, delta_yaw=0.0, speed_mps=0.0):
+        """里程计位移 + 航向增量传播；运动噪声与位移和速度正相关。"""
         if not self.initialized:
             return
 
@@ -251,6 +320,13 @@ class ParticleFilter(object):
         dx = float(delta_local_x)
         dy = float(delta_local_y)
         dyaw = float(delta_yaw)
+        try:
+            speed = abs(float(speed_mps))
+            if not math.isfinite(speed):
+                speed = 0.0
+        except (TypeError, ValueError):
+            speed = 0.0
+        speed_noise_scale = 1.0 + max(0.0, float(cfg.motion_speed_noise_gain)) * speed
         cos_t = math.cos(float(odom_theta))
         sin_t = math.sin(float(odom_theta))
         delta_global_x = dx * cos_t - dy * sin_t
@@ -261,9 +337,9 @@ class ParticleFilter(object):
         if abs(dyaw) > 1e-12:
             self.particles[:, 2] += dyaw
 
-        std_lx = float(cfg.motion_std_x) * abs(dx)
-        std_ly = float(cfg.motion_std_y) * abs(dy)
-        std_yaw = float(cfg.motion_std_yaw) * abs(dyaw)
+        std_lx = float(cfg.motion_std_x) * abs(dx) * speed_noise_scale
+        std_ly = float(cfg.motion_std_y) * abs(dy) * speed_noise_scale
+        std_yaw = float(cfg.motion_std_yaw) * abs(dyaw) * speed_noise_scale
         if std_lx <= 0.0 and std_ly <= 0.0 and std_yaw <= 0.0:
             self.particles[:, 2] = _normalize_angle(self.particles[:, 2])
             self.last_motion = {
@@ -275,6 +351,9 @@ class ParticleFilter(object):
                 "motion_std_lx": std_lx,
                 "motion_std_ly": std_ly,
                 "motion_std_yaw": std_yaw,
+                "speed_mps": speed,
+                "speed_noise_scale": speed_noise_scale,
+                "stationary_skip": False,
             }
             return
 
@@ -300,6 +379,9 @@ class ParticleFilter(object):
             "motion_std_lx": std_lx,
             "motion_std_ly": std_ly,
             "motion_std_yaw": std_yaw,
+            "speed_mps": speed,
+            "speed_noise_scale": speed_noise_scale,
+            "stationary_skip": False,
         }
 
     def _prepare_lidar(self, lidar_layers):
@@ -324,6 +406,87 @@ class ParticleFilter(object):
                 "G_lat_L": dsm["G_lat_L"][idx].detach().cpu().numpy().astype(np.float32),
             },
         }
+
+    def _compute_log_weights(self, j_total, score):
+        cfg = self.pf_config
+        eps = max(float(getattr(self.score_config, "eps", 1e-6)), 1e-12)
+        tau = max(float(self.score_config.tau), eps)
+        temperature = max(float(cfg.score_temperature), 1e-6)
+        base_scale = max(tau * temperature, eps)
+        debug = {
+            "weight_mode": "cost_absolute",
+            "weight_j_scale": base_scale,
+            "weight_j_spread": 0.0,
+            "weight_base_scale": base_scale,
+            "weight_log_range": 0.0,
+        }
+
+        if not bool(cfg.score_is_cost):
+            score_safe = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
+            score_max = torch.max(score_safe)
+            if float(score_max.item()) > 1e-30:
+                log_weights = torch.log(torch.clamp(score_safe / score_max, min=1e-30))
+                if abs(temperature - 1.0) > 1e-6:
+                    log_weights = log_weights / temperature
+            else:
+                log_weights = torch.zeros_like(score_safe)
+            finite_log = log_weights[torch.isfinite(log_weights)]
+            if finite_log.numel() > 0:
+                debug["weight_log_range"] = float((finite_log.max() - finite_log.min()).item())
+            debug["weight_mode"] = "score_relative"
+            self.last_weight_debug = debug
+            return log_weights
+
+        finite_mask = torch.isfinite(j_total)
+        finite_j = j_total[finite_mask]
+        if finite_j.numel() == 0:
+            debug["weight_mode"] = "uniform_invalid_cost"
+            self.last_weight_debug = debug
+            return torch.zeros_like(j_total)
+
+        j_min = torch.min(finite_j)
+        invalid_delta = max(float(cfg.nan_score_penalty), base_scale * 80.0)
+        j_safe = torch.where(
+            finite_mask,
+            j_total,
+            torch.full_like(j_total, float(j_min.item()) + invalid_delta),
+        )
+        delta_j = torch.clamp(j_safe - j_min, min=0.0)
+        finite_delta = torch.clamp(finite_j - j_min, min=0.0)
+
+        j_spread = 0.0
+        if finite_delta.numel() >= 2:
+            q10 = _percentile_1d(finite_delta, 0.10)
+            q90 = _percentile_1d(finite_delta, 0.90)
+            if torch.isfinite(q10) and torch.isfinite(q90):
+                j_spread = max(0.0, float((q90 - q10).item()))
+
+        mode_req = str(cfg.weight_contrast_mode).strip().lower()
+        j_scale = base_scale
+        if mode_req in ("adaptive", "contrast", "contrastive"):
+            min_spread = max(float(cfg.weight_contrast_min_j_spread), 0.0)
+            if j_spread >= min_spread:
+                target_log_range = max(float(cfg.weight_contrast_target_log_range), 1e-6)
+                adaptive_scale = max(j_spread / target_log_range, eps)
+                max_sharpen = max(float(cfg.weight_contrast_max_sharpen), 1.0)
+                min_scale = max(base_scale / max_sharpen, eps)
+                j_scale = min(base_scale, max(adaptive_scale, min_scale))
+                debug["weight_mode"] = "adaptive_contrast"
+            else:
+                debug["weight_mode"] = "adaptive_flat"
+        elif mode_req in ("absolute", "fixed", "legacy"):
+            debug["weight_mode"] = "cost_absolute"
+        else:
+            debug["weight_mode"] = "cost_absolute_unknown_mode"
+
+        log_weights = -delta_j / max(j_scale, eps)
+        if finite_delta.numel() > 0:
+            debug["weight_log_range"] = float((finite_delta.max() / max(j_scale, eps)).item())
+        debug["weight_j_scale"] = float(j_scale)
+        debug["weight_j_spread"] = float(j_spread)
+        debug["weight_base_scale"] = float(base_scale)
+        self.last_weight_debug = debug
+        return log_weights
 
     def update(self, lidar_layers):
         if not self.initialized:
@@ -364,20 +527,7 @@ class ParticleFilter(object):
         self._cache_best_vis(dsm, h_d, best_idx)
 
         cfg = self.pf_config
-        # 组内相对 score：exp(-(J-Jmin)/tau)，与扰动候选 / Global-Local 组内归一化一致
-        score_safe = torch.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
-        score_max = torch.max(score_safe)
-        if float(score_max.item()) > 1e-30:
-            log_weights = torch.log(torch.clamp(score_safe / score_max, min=1e-30))
-        else:
-            j_safe = torch.nan_to_num(j_total, nan=1e6, posinf=1e6, neginf=1e6)
-            j_min = torch.min(j_safe)
-            tau = max(float(self.score_config.tau), 1e-6)
-            log_weights = -(j_safe - j_min) / tau
-
-        sharpness = max(float(cfg.score_temperature), 1e-6)
-        if abs(sharpness - 1.0) > 1e-6:
-            log_weights = log_weights / sharpness
+        log_weights = self._compute_log_weights(j_total, score)
 
         bad = ~torch.isfinite(log_weights)
         if bad.any():
@@ -457,7 +607,14 @@ class ParticleFilter(object):
         return torch.topk(self.scores, k, largest=True).indices
 
     def estimate_pose(self):
-        w = self.weights
+        w = torch.nan_to_num(self.weights, nan=0.0, posinf=0.0, neginf=0.0)
+        w_sum = torch.sum(w)
+        if (not torch.isfinite(w_sum)) or float(w_sum.item()) <= 1e-12:
+            n = int(self.particles.shape[0])
+            w = torch.full((n,), 1.0 / max(n, 1), dtype=torch.float32, device=self.device)
+        else:
+            w = w / w_sum
+
         x_w = float(torch.sum(w * self.particles[:, 0]).item())
         y_w = float(torch.sum(w * self.particles[:, 1]).item())
         sin_w = float(torch.sum(w * torch.sin(self.particles[:, 2])).item())
@@ -466,11 +623,9 @@ class ParticleFilter(object):
 
         elite_idx = self._elite_indices()
         x_e, y_e, yaw_e = self._mean_pose_from_indices(elite_idx)
-        mode = str(self.pf_config.estimate_mode).strip().lower()
-        if mode == "elite_mean":
-            x_est, y_est, yaw_est = x_e, y_e, yaw_e
-        else:
-            x_est, y_est, yaw_est = x_w, y_w, yaw_w
+        configured_mode = str(self.pf_config.estimate_mode).strip().lower()
+        mode = "weighted"
+        x_est, y_est, yaw_est = x_w, y_w, yaw_w
 
         if self.pf_config.score_is_cost:
             finite_j = self.j_totals[torch.isfinite(self.j_totals)]
@@ -520,6 +675,7 @@ class ParticleFilter(object):
             "yaw_est_elite": yaw_e,
             "elite_count": int(elite_idx.numel()),
             "estimate_mode": mode,
+            "configured_estimate_mode": configured_mode,
             "best_x": float(best[0].item()),
             "best_y": float(best[1].item()),
             "best_yaw": float(best[2].item()),
@@ -530,6 +686,15 @@ class ParticleFilter(object):
             "neff": self.effective_sample_size(),
             "weight_max": float(torch.max(self.weights).item()),
             "weight_min": float(torch.min(self.weights).item()),
+            "weight_mode": str(self.last_weight_debug.get("weight_mode", "")),
+            "weight_j_scale": float(self.last_weight_debug.get("weight_j_scale", float("nan"))),
+            "weight_j_spread": float(self.last_weight_debug.get("weight_j_spread", float("nan"))),
+            "weight_base_scale": float(
+                self.last_weight_debug.get("weight_base_scale", float("nan"))
+            ),
+            "weight_log_range": float(
+                self.last_weight_debug.get("weight_log_range", float("nan"))
+            ),
             "valid_score_count": valid_score_count,
             "J_min": j_min,
             "J_max": j_max,
@@ -541,9 +706,10 @@ class ParticleFilter(object):
 
     def observe_and_resample(self, lidar_layers, timestamp=None):
         self.update(lidar_layers)
-        resampled = self.maybe_resample()
         estimate = self.estimate_pose()
-        estimate["resampled"] = bool(resampled)
+        threshold = float(self.pf_config.resample_threshold) * int(self.pf_config.num_particles)
+        should_resample = float(estimate["neff"]) < threshold
+        estimate["resampled"] = bool(should_resample)
         estimate["frame_id"] = self.frame_id
         estimate["timestamp"] = timestamp
 
@@ -560,8 +726,19 @@ class ParticleFilter(object):
 
         self.last_debug = estimate
         self._save_debug(timestamp, estimate)
+        self._save_weight_vis(timestamp, estimate)
+        if should_resample:
+            self.systematic_resample()
         self.frame_id += 1
         return estimate
+
+    def _weight_vis_output_dir(self):
+        vis_dir = str(self.pf_config.weight_vis_dir).strip()
+        if not vis_dir:
+            vis_dir = "pf_weight_vis"
+        if os.path.isabs(vis_dir):
+            return vis_dir
+        return os.path.join(self.pf_config.debug_dir, vis_dir)
 
     def _save_debug(self, timestamp, estimate):
         cfg = self.pf_config
@@ -590,6 +767,11 @@ class ParticleFilter(object):
                         int(estimate.get("resampled", False)),
                         estimate["weight_max"],
                         estimate["weight_min"],
+                        estimate.get("weight_mode", ""),
+                        estimate.get("weight_j_scale", ""),
+                        estimate.get("weight_j_spread", ""),
+                        estimate.get("weight_base_scale", ""),
+                        estimate.get("weight_log_range", ""),
                         estimate["valid_score_count"],
                         estimate.get("cuda_memory_allocated", 0.0),
                         estimate.get("cuda_memory_reserved", 0.0),
@@ -616,3 +798,30 @@ class ParticleFilter(object):
                             weights[pid],
                         ]
                     )
+
+    def _save_weight_vis(self, timestamp, estimate):
+        cfg = self.pf_config
+        if not cfg.save_weight_vis or self._weight_vis_failed:
+            return
+
+        frame_id = int(estimate.get("frame_id", self.frame_id))
+        every_n = max(1, int(cfg.weight_vis_every_n))
+        if frame_id % every_n != 0:
+            return
+
+        particles = self.particles.detach().cpu().numpy()
+        weights = self.weights.detach().cpu().numpy()
+        try:
+            out_path = save_particle_weight_view(
+                self.dsm_cropper,
+                particles,
+                weights,
+                estimate,
+                self._weight_vis_output_dir(),
+                timestamp=timestamp,
+            )
+            estimate["weight_vis_path"] = out_path
+        except Exception as exc:
+            self._weight_vis_failed = True
+            estimate["weight_vis_error"] = str(exc)
+            print("PF weight visualization disabled: {}".format(exc))

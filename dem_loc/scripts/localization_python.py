@@ -50,7 +50,6 @@ from loc_tool.dsm_bev_score_runner import (
 )
 from loc_tool.dsm_bev_score_vis import (
     build_dual_patch_view,
-    build_global_masked_patch_view,
     build_quad_patch_view,
 )
 from loc_tool.dsm_patch import DsmPatchCropper, bev_grid_shape
@@ -65,7 +64,7 @@ DEM_MAP_RESOLUTION_M = 0.2
 
 WINDOW_DSM_TRACK = "DSM Track"
 WINDOW_DSM_BEV_SCORE = "DSM-BEV 4x4"
-WINDOW_DSM_BEV_GLOBAL_MASKED = "DSM-BEV Global Masked"
+WINDOW_PF_WEIGHT = "PF Particle Weights"
 
 DEFAULT_BEV_MAP_SIZE_X = 64.0
 DEFAULT_BEV_MAP_SIZE_Y = 64.0
@@ -117,10 +116,22 @@ def _draw_track_legend(image, draw_global, draw_local, draw_odom, draw_pf=False)
 
 def _create_resizable_window(name, width, height):
     flags = cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO
-    if hasattr(cv2, "WINDOW_GUI_NORMAL"):
+    if hasattr(cv2, "WINDOW_GUI_EXPANDED"):
+        flags |= cv2.WINDOW_GUI_EXPANDED
+    elif hasattr(cv2, "WINDOW_GUI_NORMAL"):
         flags |= cv2.WINDOW_GUI_NORMAL
     cv2.namedWindow(name, flags)
     cv2.resizeWindow(name, int(width), int(height))
+
+
+def _imshow_named(name, image):
+    flags = cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO
+    if hasattr(cv2, "WINDOW_GUI_EXPANDED"):
+        flags |= cv2.WINDOW_GUI_EXPANDED
+    elif hasattr(cv2, "WINDOW_GUI_NORMAL"):
+        flags |= cv2.WINDOW_GUI_NORMAL
+    cv2.namedWindow(name, flags)
+    cv2.imshow(name, image)
 
 
 def _cli_sets_param(name):
@@ -220,7 +231,7 @@ class PythonLocalizationNode(object):
         )
         self.enable_dsm_bev_score = _param_bool("enable_dsm_bev_score", True)
         self.show_dsm_bev_score_window = _param_bool("show_dsm_bev_score_window", True)
-        self.show_global_masked_patch_window = _param_bool("show_global_masked_patch_window", True)
+        self.show_pf_weight_window = _param_bool("show_pf_weight_window", True)
         self.dsm_bev_score_every_n = max(1, int(rospy.get_param("~dsm_bev_score_every_n", 1)))
         default_score_debug_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", "output", "dsm_bev_score_debug")
@@ -266,7 +277,12 @@ class PythonLocalizationNode(object):
         default_pf_debug_dir = os.path.abspath(
             os.path.join(os.path.dirname(__file__), "..", self.pf_config.debug_dir)
         )
-        self.pf_config.debug_dir = rospy.get_param("~pf_debug_dir", default_pf_debug_dir)
+        pf_debug_dir = rospy.get_param("~pf_debug_dir", default_pf_debug_dir)
+        if not os.path.isabs(pf_debug_dir):
+            pf_debug_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", pf_debug_dir)
+            )
+        self.pf_config.debug_dir = pf_debug_dir
 
         if self.show_window and os.name != "nt" and not os.environ.get("DISPLAY"):
             rospy.logwarn("DISPLAY is not set; disabling OpenCV windows.")
@@ -346,7 +362,7 @@ class PythonLocalizationNode(object):
             _create_resizable_window(
                 WINDOW_DSM_TRACK, self.track_window_width, self.track_window_height
             )
-            cv2.imshow(WINDOW_DSM_TRACK, self.vis_track)
+            _imshow_named(WINDOW_DSM_TRACK, self.vis_track)
             if self.show_window and (self.enable_dsm_bev_score or self.enable_particle_filter) and self.show_dsm_bev_score_window:
                 rows, cols = bev_grid_shape(
                     self.bev_map_size_x, self.bev_map_size_y, self.bev_resolution
@@ -354,13 +370,11 @@ class PythonLocalizationNode(object):
                 _create_resizable_window(
                     WINDOW_DSM_BEV_SCORE, cols * 4, (rows + 28) * 4
                 )
-            if self.enable_dsm_bev_score and self.show_global_masked_patch_window:
+            if self.enable_particle_filter and self.show_pf_weight_window:
                 rows, cols = bev_grid_shape(
                     self.bev_map_size_x, self.bev_map_size_y, self.bev_resolution
                 )
-                _create_resizable_window(
-                    WINDOW_DSM_BEV_GLOBAL_MASKED, cols * 4, (rows + 28) + 32
-                )
+                _create_resizable_window(WINDOW_PF_WEIGHT, cols, rows + 26)
             cv2.waitKey(1)
 
         rospy.loginfo(
@@ -468,10 +482,8 @@ class PythonLocalizationNode(object):
             rows, cols = bev_grid_shape(map_size_x, map_size_y, resolution)
             if self.show_window and (self.enable_dsm_bev_score or self.enable_particle_filter) and self.show_dsm_bev_score_window:
                 _create_resizable_window(WINDOW_DSM_BEV_SCORE, cols * 4, (rows + 28) * 4)
-            if self.show_window and self.enable_dsm_bev_score and self.show_global_masked_patch_window:
-                _create_resizable_window(
-                    WINDOW_DSM_BEV_GLOBAL_MASKED, cols * 4, (rows + 28) + 32
-                )
+            if self.show_window and self.enable_particle_filter and self.show_pf_weight_window:
+                _create_resizable_window(WINDOW_PF_WEIGHT, cols, rows + 26)
 
     def _parse_bev_layers(self):
         """解析 LiDAR BEV 一次，供 PF / 可视化复用。"""
@@ -485,24 +497,22 @@ class PythonLocalizationNode(object):
         h_max = compute_h_max(lidar_layers["H_L"], m_obs, self.score_config)
         return lidar_layers, h_max
 
-    def _show_global_masked_patch(self, lidar_layers, global_layers, global_score):
+    def _show_pf_weight_vis(self, pf_estimate):
         if not (
             self.show_window
-            and self.enable_dsm_bev_score
-            and self.show_global_masked_patch_window
+            and self.enable_particle_filter
+            and self.show_pf_weight_window
+            and pf_estimate is not None
         ):
             return
-        result = {
-            "lidar_layers": lidar_layers,
-            "global": {
-                "dsm_result": {"layers": global_layers},
-                "score": global_score,
-            },
-        }
-        cv2.imshow(
-            WINDOW_DSM_BEV_GLOBAL_MASKED,
-            build_global_masked_patch_view(result, score_config=self.score_config),
-        )
+        out_path = pf_estimate.get("weight_vis_path")
+        if not out_path:
+            return
+        image = cv2.imread(out_path, cv2.IMREAD_COLOR)
+        if image is None:
+            rospy.logwarn_throttle(5.0, "Failed to read PF weight visualization: %s", out_path)
+            return
+        _imshow_named(WINDOW_PF_WEIGHT, image)
 
     def _try_update_bev_frame(self):
         need_score = self.enable_dsm_bev_score
@@ -550,6 +560,7 @@ class PythonLocalizationNode(object):
                 pf_estimate = None
 
             if pf_estimate is not None:
+                self._show_pf_weight_vis(pf_estimate)
                 if self.latest_global_pose is not None:
                     try:
                         g_gauss_x, g_gauss_y, g_theta = global_pose_gauss_theta(
@@ -653,7 +664,6 @@ class PythonLocalizationNode(object):
         )
         use_pf_quad = (
             pf_estimate is not None
-            and pf_estimate.get("pf_best") is not None
             and self.latest_global_pose is not None
         )
 
@@ -662,7 +672,6 @@ class PythonLocalizationNode(object):
 
         try:
             if use_pf_quad:
-                pf_best = pf_estimate["pf_best"]
                 if global_ref is None:
                     g_gauss_x, g_gauss_y, g_theta = global_pose_gauss_theta(
                         self.coord_converter,
@@ -683,19 +692,31 @@ class PythonLocalizationNode(object):
                     self._last_global_ref_score = float(global_score["score"])
                 else:
                     global_score, global_dsm = global_ref
+                pf_output_pose = {
+                    "gauss_x": float(pf_estimate["x_est"]),
+                    "gauss_y": float(pf_estimate["y_est"]),
+                    "yaw": float(pf_estimate["yaw_est"]),
+                }
+                pf_output_score, pf_output_dsm = score_at_pose(
+                    self.dsm_patch_cropper,
+                    pf_output_pose["gauss_x"],
+                    pf_output_pose["gauss_y"],
+                    pf_output_pose["yaw"],
+                    lidar_layers,
+                    self.score_config,
+                    h_max=h_max,
+                )
                 vis = build_quad_patch_view(
                     lidar_layers,
                     global_dsm["layers"],
                     global_score["score"],
-                    pf_best["layers"],
-                    pf_best["score"],
-                    pf_best_pose=pf_best,
+                    pf_output_dsm["layers"],
+                    pf_output_score["score"],
+                    pf_best_pose=pf_output_pose,
                     score_config=self.score_config,
+                    pf_label="PF output",
                 )
                 self._last_bev_vis_cache = vis
-                self._show_global_masked_patch(
-                    lidar_layers, global_dsm["layers"], global_score
-                )
                 if need_score:
                     self.dsm_bev_score_count += 1
 
@@ -767,12 +788,6 @@ class PythonLocalizationNode(object):
                 vis = build_dual_patch_view(result)
                 self._last_bev_vis_cache = vis
 
-                self._show_global_masked_patch(
-                    result["lidar_layers"],
-                    result["global"]["dsm_result"]["layers"],
-                    result["global"]["score"],
-                )
-
                 if self.save_dsm_bev_score_debug and (
                     self.dsm_bev_score_count % self.dsm_bev_score_debug_every_n == 0
                 ):
@@ -792,7 +807,7 @@ class PythonLocalizationNode(object):
             return
 
         if self.show_window and self.show_dsm_bev_score_window and self._last_bev_vis_cache is not None:
-            cv2.imshow(WINDOW_DSM_BEV_SCORE, self._last_bev_vis_cache)
+            _imshow_named(WINDOW_DSM_BEV_SCORE, self._last_bev_vis_cache)
 
     def _global_pose_gauss(self, global_pose):
         gauss_x, gauss_y, _ = self.coord_converter._extract_global_gauss_heading(
@@ -984,7 +999,7 @@ class PythonLocalizationNode(object):
     def _refresh_track_view(self, force_save=False):
         self.track_draw_count += 1
         if self.show_window:
-            cv2.imshow(WINDOW_DSM_TRACK, self.vis_track)
+            _imshow_named(WINDOW_DSM_TRACK, self.vis_track)
         if not self.save_track_image:
             return
         if not force_save and self.track_draw_count % self.save_track_every_n != 0:

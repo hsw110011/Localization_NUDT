@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>fast_lio_body_bev_ros1</name>
+  <version>0.1.0</version>
+  <description>Generate a local BEV grid_map from FAST-LIO body-frame point clouds.</description>
+
+  <maintainer email="user@todo.todo">User</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <build_depend>roscpp</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>grid_map_core</build_depend>
+  <build_depend>grid_map_ros</build_depend>
+  <build_depend>grid_map_msgs</build_depend>
+  <build_depend>pcl_conversions</build_depend>
+
+  <exec_depend>roscpp</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>grid_map_core</exec_depend>
+  <exec_depend>grid_map_ros</exec_depend>
+  <exec_depend>grid_map_msgs</exec_depend>
+  <exec_depend>pcl_conversions</exec_depend>
+</package>

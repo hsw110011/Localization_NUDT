@@ -143,8 +143,9 @@ def build_quad_patch_view(
     pf_best_score,
     pf_best_pose=None,
     score_config=None,
+    pf_label="PF best",
 ):
-    """4 行 x 4 列: LiDAR | Global | PF best | PF best masked (M_obs)。"""
+    """4 行: LiDAR | Global | PF 位姿 | PF 位姿经 M_obs mask。"""
     if cv2 is None:
         raise ImportError("dsm_bev_score_vis requires OpenCV (cv2)")
 
@@ -164,11 +165,13 @@ def build_quad_patch_view(
 
     g_score = float(global_score)
     pf_score = float(pf_best_score)
-    pf_tag = "PF best score={:.4f}".format(pf_score)
+    pf_tag = "{} score={:.4f}".format(str(pf_label), pf_score)
     if pf_best_pose is not None:
+        pose_x = pf_best_pose.get("gauss_x", pf_best_pose.get("x_est", 0.0))
+        pose_y = pf_best_pose.get("gauss_y", pf_best_pose.get("y_est", 0.0))
         pf_tag += " ({:.1f},{:.1f})".format(
-            float(pf_best_pose.get("gauss_x", 0.0)),
-            float(pf_best_pose.get("gauss_y", 0.0)),
+            float(pose_x),
+            float(pose_y),
         )
 
     rows = [
@@ -178,7 +181,7 @@ def build_quad_patch_view(
         ),
         _build_data_row(pf_tag, pf_best_layers, False, layer_ranges, m_obs),
         _build_masked_row(
-            "PF masked score={:.4f}".format(pf_score),
+            "{} masked score={:.4f}".format(str(pf_label), pf_score),
             lidar_layers,
             pf_best_layers,
             layer_ranges,
@@ -218,36 +221,3 @@ def build_dual_patch_view(result):
         ),
     ]
     return cv2.vconcat(rows)
-
-
-def build_global_masked_patch_view(result, score_config=None):
-    """GlobalPose 处 DSM patch，经 LiDAR M_obs 裁剪后单独显示。"""
-    if cv2 is None:
-        raise ImportError("dsm_bev_score_vis requires OpenCV (cv2)")
-
-    from .dsm_bev_score import DsmBevScoreConfig
-
-    if score_config is None:
-        score_config = DsmBevScoreConfig()
-
-    lidar_layers = result["lidar_layers"]
-    global_layers = result["global"]["dsm_result"]["layers"]
-    global_score = result["global"]["score"]
-    g_score = float(global_score["score"])
-
-    m_obs = np.asarray(lidar_layers["M_obs"], dtype=np.float32)
-    body = _build_masked_row(
-        "Global masked",
-        lidar_layers,
-        global_layers,
-        _layer_ranges_from_sources([(lidar_layers, True), (global_layers, False)]),
-        m_obs,
-        score_config,
-    )
-    title = "GlobalPose masked DSM | score={:.4f} n={} ng={}".format(
-        g_score,
-        int(global_score.get("valid_pixel_num", m_obs.sum())),
-        int(global_score.get("valid_grad_pixel_num", 0)),
-    )
-    stub = np.zeros((4, body.shape[1], 3), dtype=np.uint8)
-    return cv2.vconcat([add_title_bar(stub, title, bar_height=32), body])

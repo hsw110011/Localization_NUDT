@@ -44,8 +44,10 @@ def _sanitize_h_max(h_max, config):
 def _weighted_mean_batch(values, weights, mask, eps):
     """values/weights/mask: [N,H,W] -> [N]。"""
     valid = mask & torch.isfinite(values) & torch.isfinite(weights) & (weights > 0.0)
-    # 不能用 values * weights * valid.float()：mask 外 NaN * 0 仍为 NaN，会污染 sum。
-    num = torch.where(valid, values * weights, torch.zeros_like(values)).sum(dim=(1, 2))
+    # values 已经是加权后的 penalty（例如 p_h = w_h * loss），这里与
+    # dsm_bev_score._weighted_mean_over_obs 保持一致：sum(values) / sum(weights)。
+    # 不能用 values * valid.float()：mask 外 NaN * 0 仍为 NaN，会污染 sum。
+    num = torch.where(valid, values, torch.zeros_like(values)).sum(dim=(1, 2))
     den = torch.where(valid, weights, torch.zeros_like(weights)).sum(dim=(1, 2)) + float(eps)
     return num / den
 
