@@ -23,7 +23,7 @@ class DsmBevScoreConfig(object):
     min_valid_height_points: int = 10
 
     lambda_lidar_higher: float = 1.5
-    lambda_dsm_higher: float = 0.3
+    lambda_dsm_higher: float = 1.5  # 保留旧参数名；当前高度误差默认使用对称惩罚
     delta_h: float = 0.30
     w_h_base: float = 0.2
     w_h_height: float = 0.8
@@ -245,15 +245,10 @@ def compute_dsm_bev_score(
     )
 
     e_h = h_l_n - h_d_n
-    lambda_h = np.where(
-        h_l_n > h_d_n,
-        float(config.lambda_lidar_higher),
-        float(config.lambda_dsm_higher),
-    )
     w_h = m_obs.astype(np.float64) * (
         float(config.w_h_base) + float(config.w_h_height) * np.nan_to_num(h_l_n, nan=0.0)
     )
-    p_h = w_h * lambda_h * huber(e_h, config.delta_h)
+    p_h = w_h * float(config.lambda_lidar_higher) * huber(e_h, config.delta_h)
     j_h = _weighted_mean_over_obs(p_h, w_h, m_obs, config.eps)
 
     e_gx = gx_l - gx_d

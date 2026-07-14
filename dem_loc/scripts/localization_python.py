@@ -135,6 +135,71 @@ def _imshow_named(name, image):
     cv2.imshow(name, image)
 
 
+def _format_hover_number(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "nan"
+    if not np.isfinite(number):
+        return "nan"
+    return "{:.4f}".format(number)
+
+
+def _draw_hover_overlay(base_image, lines, x, y):
+    image = base_image.copy()
+    h, w = image.shape[:2]
+    x = int(np.clip(int(x), 0, max(0, w - 1)))
+    y = int(np.clip(int(y), 0, max(0, h - 1)))
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.45
+    thickness = 1
+    padding = 6
+    line_gap = 4
+    text_sizes = [cv2.getTextSize(str(line), font, font_scale, thickness)[0] for line in lines]
+    box_w = max(size[0] for size in text_sizes) + padding * 2
+    box_h = sum(size[1] for size in text_sizes) + line_gap * (len(lines) - 1) + padding * 2
+    box_x = x + 12
+    if box_x + box_w >= w:
+        box_x = x - box_w - 12
+    box_y = y + 12
+    if box_y + box_h >= h:
+        box_y = y - box_h - 12
+    box_x = int(np.clip(box_x, 0, max(0, w - box_w - 1)))
+    box_y = int(np.clip(box_y, 0, max(0, h - box_h - 1)))
+
+    overlay = image.copy()
+    cv2.rectangle(overlay, (box_x, box_y), (box_x + box_w, box_y + box_h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.76, image, 0.24, 0.0, image)
+    cv2.rectangle(image, (box_x, box_y), (box_x + box_w, box_y + box_h), (230, 230, 230), 1)
+
+    text_y = box_y + padding
+    for line, size in zip(lines, text_sizes):
+        text_y += size[1]
+        cv2.putText(
+            image,
+            str(line),
+            (box_x + padding, text_y),
+            font,
+            font_scale,
+            (255, 255, 255),
+            thickness,
+            cv2.LINE_AA,
+        )
+        text_y += line_gap
+
+    cv2.drawMarker(
+        image,
+        (x, y),
+        (0, 255, 255),
+        markerType=cv2.MARKER_CROSS,
+        markerSize=12,
+        thickness=1,
+        line_type=cv2.LINE_AA,
+    )
+    return image
+
+
 def _cli_sets_param(name):
     prefix = "_{}:".format(name)
     return any(arg.startswith(prefix) for arg in sys.argv)
@@ -251,7 +316,7 @@ class PythonLocalizationNode(object):
             alpha_gx=float(rospy.get_param("~alpha_gx", 0.25)),
             alpha_gy=float(rospy.get_param("~alpha_gy", 0.10)),
             lambda_lidar_higher=float(rospy.get_param("~lambda_lidar_higher", 1.5)),
-            lambda_dsm_higher=float(rospy.get_param("~lambda_dsm_higher", 0.3)),
+            lambda_dsm_higher=float(rospy.get_param("~lambda_dsm_higher", 1.5)),
             delta_h=float(rospy.get_param("~delta_h", 0.30)),
             w_h_base=float(rospy.get_param("~w_h_base", 0.2)),
             w_h_height=float(rospy.get_param("~w_h_height", 0.8)),
@@ -313,6 +378,26 @@ class PythonLocalizationNode(object):
         self.dsm_patch_cropper = None
         if self.enable_dsm_bev_score or self.enable_particle_filter:
             self.dsm_patch_cropper = _make_dsm_patch_cropper(self)
+            dsm_tensor_device = str(getattr(self.dsm_patch_cropper, "device", "unknown"))
+            dsm_tensor_mb = (
+                float(getattr(self.dsm_patch_cropper, "dem_tensor_bytes", 0))
+                / (1024.0 * 1024.0)
+            )
+            rospy.loginfo(
+                "DSM tensor device: %s, size=%.1f MB",
+                dsm_tensor_device,
+                dsm_tensor_mb,
+            )
+            if dsm_tensor_device.startswith("cuda"):
+                rospy.loginfo(
+                    "DSM GPU load: YES, full DSM tensor is resident on %s.",
+                    dsm_tensor_device,
+                )
+            else:
+                rospy.logwarn(
+                    "DSM GPU load: NO, full DSM tensor is on %s.",
+                    dsm_tensor_device,
+                )
 
         self.pf_runner = None
         self.pf_pose_pub = None
@@ -369,6 +454,7 @@ class PythonLocalizationNode(object):
         self.dsm_bev_score_count = 0
         self._last_global_ref_score = None
         self._last_bev_vis_cache = None
+        self._last_bev_vis_hover_meta = None
         self._last_heartbeat_time = time.time()
 
         if self.show_window:
@@ -525,6 +611,65 @@ class PythonLocalizationNode(object):
         if image is None:
             return
         _imshow_named(WINDOW_PF_WEIGHT, image)
+
+    def _set_bev_vis_cache(self, image, hover_meta=None):
+        self._last_bev_vis_cache = image
+        self._last_bev_vis_hover_meta = hover_meta
+
+    def _lookup_bev_hover_lines(self, x, y):
+        meta = self._last_bev_vis_hover_meta or {}
+        for panel in meta.get("panels", []):
+            x0 = int(panel.get("x0", 0))
+            y0 = int(panel.get("y0", 0))
+            x1 = int(panel.get("x1", 0))
+            y1 = int(panel.get("y1", 0))
+            bar_height = int(panel.get("bar_height", 0))
+            if not (x0 <= x < x1 and y0 + bar_height <= y < y1):
+                continue
+
+            values = panel.get("values")
+            if values is None:
+                continue
+            arr = np.asarray(values)
+            if arr.ndim < 2 or arr.shape[0] <= 0 or arr.shape[1] <= 0:
+                continue
+
+            local_x = float(x - x0)
+            local_y = float(y - y0 - bar_height)
+            image_w = max(1.0, float(panel.get("image_width", x1 - x0)))
+            image_h = max(1.0, float(panel.get("image_height", y1 - y0 - bar_height)))
+            col = int(np.clip(np.floor(local_x * arr.shape[1] / image_w), 0, arr.shape[1] - 1))
+            row = int(np.clip(np.floor(local_y * arr.shape[0] / image_h), 0, arr.shape[0] - 1))
+            value = arr[row, col]
+            return [
+                "{}  row={} col={}".format(panel.get("title", "panel"), row, col),
+                "value={}".format(_format_hover_number(value)),
+            ]
+        return None
+
+    def _on_bev_score_mouse(self, event, x, y, flags, userdata):
+        if event not in (cv2.EVENT_MOUSEMOVE, cv2.EVENT_LBUTTONDOWN):
+            return
+        if self._last_bev_vis_cache is None:
+            return
+
+        lines = self._lookup_bev_hover_lines(int(x), int(y))
+        if not lines:
+            cv2.imshow(WINDOW_DSM_BEV_SCORE, self._last_bev_vis_cache)
+            return
+        hover_image = _draw_hover_overlay(self._last_bev_vis_cache, lines, x, y)
+        cv2.imshow(WINDOW_DSM_BEV_SCORE, hover_image)
+
+    def _show_bev_score_vis(self):
+        if self._last_bev_vis_cache is None:
+            return
+        _imshow_named(WINDOW_DSM_BEV_SCORE, self._last_bev_vis_cache)
+        try:
+            cv2.setMouseCallback(WINDOW_DSM_BEV_SCORE, self._on_bev_score_mouse)
+        except cv2.error as exc:
+            rospy.logwarn_throttle(
+                5.0, "Failed to install DSM-BEV score mouse callback: %s", exc
+            )
 
     def _init_pose_csv(self):
         if not self.save_pose_csv:
@@ -719,6 +864,7 @@ class PythonLocalizationNode(object):
                             lidar_layers,
                             self.score_config,
                             h_max=h_max,
+                            return_dsm_result=want_score_view,
                         )
                         global_ref = (global_score, global_dsm)
                         self._last_global_ref_score = float(global_score["score"])
@@ -756,6 +902,7 @@ class PythonLocalizationNode(object):
                                 lidar_layers,
                                 self.score_config,
                                 h_max=h_max,
+                                return_dsm_result=False,
                             )
                             l_sc = float(local_score_dict["score"])
                             l_detail = local_score_dict
@@ -816,7 +963,7 @@ class PythonLocalizationNode(object):
 
         try:
             if use_pf_quad:
-                if global_ref is None:
+                if global_ref is None or global_ref[1] is None:
                     g_gauss_x, g_gauss_y, g_theta = global_pose_gauss_theta(
                         self.coord_converter,
                         self.latest_global_pose,
@@ -831,6 +978,7 @@ class PythonLocalizationNode(object):
                         lidar_layers,
                         self.score_config,
                         h_max=h_max,
+                        return_dsm_result=True,
                     )
                     global_ref = (global_score, global_dsm)
                     self._last_global_ref_score = float(global_score["score"])
@@ -849,8 +997,9 @@ class PythonLocalizationNode(object):
                     lidar_layers,
                     self.score_config,
                     h_max=h_max,
+                    return_dsm_result=True,
                 )
-                vis = build_quad_patch_view(
+                vis, hover_meta = build_quad_patch_view(
                     lidar_layers,
                     global_dsm["layers"],
                     global_score["score"],
@@ -859,8 +1008,9 @@ class PythonLocalizationNode(object):
                     pf_best_pose=pf_output_pose,
                     score_config=self.score_config,
                     pf_label="PF output",
+                    return_meta=True,
                 )
-                self._last_bev_vis_cache = vis
+                self._set_bev_vis_cache(vis, hover_meta)
                 if need_score:
                     self.dsm_bev_score_count += 1
 
@@ -893,6 +1043,7 @@ class PythonLocalizationNode(object):
                     local_heading_convention=self.local_heading_convention,
                     lidar_layers=lidar_layers,
                     h_max=h_max,
+                    return_dsm_results=want_score_view,
                 )
                 self.dsm_bev_score_count += 1
                 self._last_global_ref_score = float(result["global"]["score"]["score"])
@@ -929,29 +1080,33 @@ class PythonLocalizationNode(object):
                             5.0, "DSM-BEV perturbation score skipped: %s", exc
                         )
 
-                vis = build_dual_patch_view(result)
-                self._last_bev_vis_cache = vis
+                if want_score_view:
+                    vis, hover_meta = build_dual_patch_view(result, return_meta=True)
+                    self._set_bev_vis_cache(vis, hover_meta)
 
-                if self.save_dsm_bev_score_debug and (
-                    self.dsm_bev_score_count % self.dsm_bev_score_debug_every_n == 0
-                ):
-                    os.makedirs(self.dsm_bev_score_debug_dir, exist_ok=True)
-                    out_path = os.path.join(
-                        self.dsm_bev_score_debug_dir,
-                        "score_{:06d}.png".format(self.dsm_bev_score_count),
-                    )
-                    try:
-                        cv2.imwrite(out_path, vis)
-                    except cv2.error as exc:
-                        rospy.logwarn_throttle(
-                            5.0, "Failed to save DSM-BEV score debug '%s': %s", out_path, exc
+                    if self.save_dsm_bev_score_debug and (
+                        self.dsm_bev_score_count % self.dsm_bev_score_debug_every_n == 0
+                    ):
+                        os.makedirs(self.dsm_bev_score_debug_dir, exist_ok=True)
+                        out_path = os.path.join(
+                            self.dsm_bev_score_debug_dir,
+                            "score_{:06d}.png".format(self.dsm_bev_score_count),
                         )
+                        try:
+                            cv2.imwrite(out_path, vis)
+                        except cv2.error as exc:
+                            rospy.logwarn_throttle(
+                                5.0,
+                                "Failed to save DSM-BEV score debug '%s': %s",
+                                out_path,
+                                exc,
+                            )
         except (KeyError, ValueError) as exc:
             rospy.logwarn_throttle(5.0, "DSM-BEV vis skipped: %s", exc)
             return
 
         if self.show_window and self.show_dsm_bev_score_window and self._last_bev_vis_cache is not None:
-            _imshow_named(WINDOW_DSM_BEV_SCORE, self._last_bev_vis_cache)
+            self._show_bev_score_vis()
 
     def _global_pose_gauss(self, global_pose):
         gauss_x, gauss_y, _ = self.coord_converter._extract_global_gauss_heading(

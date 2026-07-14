@@ -23,9 +23,10 @@ _LAYER_SPECS = (
     ("G_long", "G_long_L", "Gy_L"),
     ("G_lat", "G_lat_L", "Gx_L"),
 )
+_TITLE_BAR_HEIGHT = 28
 
 
-def add_title_bar(image, title, bar_height=28):
+def add_title_bar(image, title, bar_height=_TITLE_BAR_HEIGHT):
     if cv2 is None:
         raise ImportError("dsm_bev_score_vis requires OpenCV (cv2)")
 
@@ -57,6 +58,52 @@ def _hconcat_panels(panels):
     return cv2.hconcat(aligned)
 
 
+def _make_panel(image, title, values):
+    panel = add_title_bar(image, title)
+    return panel, {
+        "title": str(title),
+        "values": np.asarray(values, dtype=np.float32),
+        "bar_height": _TITLE_BAR_HEIGHT,
+    }
+
+
+def _hconcat_panel_records(records):
+    panels = [record[0] for record in records]
+    row = _hconcat_panels(panels)
+    x0 = 0
+    meta = []
+    for panel, panel_meta in records:
+        item = dict(panel_meta)
+        item.update(
+            {
+                "x0": x0,
+                "y0": 0,
+                "x1": x0 + panel.shape[1],
+                "y1": panel.shape[0],
+                "image_width": panel.shape[1],
+                "image_height": max(1, panel.shape[0] - int(item.get("bar_height", 0))),
+            }
+        )
+        meta.append(item)
+        x0 += panel.shape[1]
+    return row, meta
+
+
+def _vconcat_row_records(records):
+    rows = [record[0] for record in records]
+    image = cv2.vconcat(rows)
+    panels = []
+    y0 = 0
+    for row, row_meta in records:
+        for panel_meta in row_meta:
+            item = dict(panel_meta)
+            item["y0"] += y0
+            item["y1"] += y0
+            panels.append(item)
+        y0 += row.shape[0]
+    return image, {"panels": panels, "image_shape": image.shape[:2]}
+
+
 def _collect_layer(data, dsm_key, lidar_key, from_lidar):
     if from_lidar:
         return np.asarray(data[lidar_key], dtype=np.float32)
@@ -81,27 +128,50 @@ def _layer_ranges_from_sources(sources):
     return ranges
 
 
-def _build_data_row(row_title, data, from_lidar, layer_ranges, m_obs, m_label="M_L"):
+def _build_data_row(
+    row_title,
+    data,
+    from_lidar,
+    layer_ranges,
+    m_obs,
+    m_label="M_L",
+    return_meta=False,
+):
     panels = []
     for layer_label, dsm_key, lidar_key in _LAYER_SPECS:
         arr = _collect_layer(data, dsm_key, lidar_key, from_lidar)
         vmin, vmax = layer_ranges[layer_label]
+        title = "{} {}".format(row_title.split()[0], layer_label)
         panels.append(
-            add_title_bar(
+            _make_panel(
                 draw_center_dot(render_colorized_layer(arr, vmin, vmax)),
-                "{} {}".format(row_title.split()[0], layer_label),
+                title,
+                arr,
             )
         )
+    mask_title = "{} {}".format(row_title.split()[0], m_label)
     panels.append(
-        add_title_bar(
+        _make_panel(
             draw_center_dot(render_mask_layer(m_obs)),
-            "{} {}".format(row_title.split()[0], m_label),
+            mask_title,
+            m_obs,
         )
     )
-    return _hconcat_panels(panels)
+    row, meta = _hconcat_panel_records(panels)
+    if return_meta:
+        return row, meta
+    return row
 
 
-def _build_masked_row(row_title, lidar_layers, dsm_layers, layer_ranges, m_obs, score_config):
+def _build_masked_row(
+    row_title,
+    lidar_layers,
+    dsm_layers,
+    layer_ranges,
+    m_obs,
+    score_config,
+    return_meta=False,
+):
     _, masked = apply_bev_mask_to_layers(
         lidar_layers["H_L"],
         lidar_layers["Gx_L"],
@@ -120,19 +190,26 @@ def _build_masked_row(row_title, lidar_layers, dsm_layers, layer_ranges, m_obs, 
     for layer_label, dsm_key, lidar_key in _LAYER_SPECS:
         arr = np.asarray(dsm_masked[dsm_key], dtype=np.float32)
         vmin, vmax = layer_ranges[layer_label]
+        title = "{} {}".format(row_title.split()[0], layer_label)
         panels.append(
-            add_title_bar(
+            _make_panel(
                 draw_center_dot(render_masked_colorized_layer(arr, m_obs, vmin, vmax)),
-                "{} {}".format(row_title.split()[0], layer_label),
+                title,
+                arr,
             )
         )
+    mask_title = "{} M_L".format(row_title.split()[0])
     panels.append(
-        add_title_bar(
+        _make_panel(
             draw_center_dot(render_mask_layer(m_obs)),
-            "{} M_L".format(row_title.split()[0]),
+            mask_title,
+            m_obs,
         )
     )
-    return _hconcat_panels(panels)
+    row, meta = _hconcat_panel_records(panels)
+    if return_meta:
+        return row, meta
+    return row
 
 
 def build_quad_patch_view(
@@ -144,6 +221,7 @@ def build_quad_patch_view(
     pf_best_pose=None,
     score_config=None,
     pf_label="PF best",
+    return_meta=False,
 ):
     """4 行: LiDAR | Global | PF 位姿 | PF 位姿经 M_obs mask。"""
     if cv2 is None:
@@ -175,11 +253,20 @@ def build_quad_patch_view(
         )
 
     rows = [
-        _build_data_row("LiDAR BEV", lidar_layers, True, layer_ranges, m_obs),
         _build_data_row(
-            "Global score={:.4f}".format(g_score), global_layers, False, layer_ranges, m_obs
+            "LiDAR BEV", lidar_layers, True, layer_ranges, m_obs, return_meta=return_meta
         ),
-        _build_data_row(pf_tag, pf_best_layers, False, layer_ranges, m_obs),
+        _build_data_row(
+            "Global score={:.4f}".format(g_score),
+            global_layers,
+            False,
+            layer_ranges,
+            m_obs,
+            return_meta=return_meta,
+        ),
+        _build_data_row(
+            pf_tag, pf_best_layers, False, layer_ranges, m_obs, return_meta=return_meta
+        ),
         _build_masked_row(
             "{} masked score={:.4f}".format(str(pf_label), pf_score),
             lidar_layers,
@@ -187,12 +274,15 @@ def build_quad_patch_view(
             layer_ranges,
             m_obs,
             score_config,
+            return_meta=return_meta,
         ),
     ]
+    if return_meta:
+        return _vconcat_row_records(rows)
     return cv2.vconcat(rows)
 
 
-def build_dual_patch_view(result):
+def build_dual_patch_view(result, return_meta=False):
     """3 行竖拼，每行 H_rel | G_long | G_lat | M_L 横排（兼容旧接口）。"""
     if cv2 is None:
         raise ImportError("dsm_bev_score_vis requires OpenCV (cv2)")
@@ -212,12 +302,26 @@ def build_dual_patch_view(result):
     m_obs = np.asarray(lidar_layers["M_obs"], dtype=np.float32)
 
     rows = [
-        _build_data_row("LiDAR BEV", lidar_layers, True, layer_ranges, m_obs),
         _build_data_row(
-            "Global score={:.4f}".format(global_score), global_layers, False, layer_ranges, m_obs
+            "LiDAR BEV", lidar_layers, True, layer_ranges, m_obs, return_meta=return_meta
         ),
         _build_data_row(
-            "Local score={:.4f}".format(local_score), local_layers, False, layer_ranges, m_obs
+            "Global score={:.4f}".format(global_score),
+            global_layers,
+            False,
+            layer_ranges,
+            m_obs,
+            return_meta=return_meta,
+        ),
+        _build_data_row(
+            "Local score={:.4f}".format(local_score),
+            local_layers,
+            False,
+            layer_ranges,
+            m_obs,
+            return_meta=return_meta,
         ),
     ]
+    if return_meta:
+        return _vconcat_row_records(rows)
     return cv2.vconcat(rows)

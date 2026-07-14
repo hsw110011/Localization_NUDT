@@ -9,6 +9,7 @@ BEV 对齐:
 """
 
 import math
+import warnings
 
 import numpy as np
 
@@ -31,6 +32,49 @@ _SOBEL_X = torch.tensor(
 _SOBEL_Y = torch.tensor(
     [[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]], dtype=torch.float32
 ).view(1, 1, 3, 3)
+
+
+def _cuda_mem_get_info(device):
+    try:
+        with torch.cuda.device(device):
+            return torch.cuda.mem_get_info()
+    except Exception:
+        return None
+
+
+def _select_dem_tensor_device(requested_device, required_bytes, safety_factor=1.25):
+    if requested_device is None:
+        requested = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        try:
+            requested = torch.device(requested_device)
+        except (TypeError, RuntimeError):
+            warnings.warn(
+                "Invalid DSM tensor device '{}', falling back to CPU.".format(requested_device)
+            )
+            return torch.device("cpu")
+
+    if requested.type != "cuda":
+        return requested
+    if not torch.cuda.is_available():
+        warnings.warn("CUDA unavailable, DSM tensor falls back to CPU.")
+        return torch.device("cpu")
+
+    mem_info = _cuda_mem_get_info(requested)
+    if mem_info is not None:
+        free_bytes, _ = mem_info
+        need_bytes = int(float(required_bytes) * float(safety_factor))
+        if int(free_bytes) < need_bytes:
+            warnings.warn(
+                "Free CUDA memory is not enough for DSM tensor "
+                "({:.1f} MB free, {:.1f} MB required with safety factor); "
+                "falling back to CPU.".format(
+                    int(free_bytes) / (1024.0 * 1024.0),
+                    need_bytes / (1024.0 * 1024.0),
+                )
+            )
+            return torch.device("cpu")
+    return requested
 
 
 def bev_grid_shape(map_size_x, map_size_y, resolution):
@@ -238,12 +282,6 @@ class DsmPatchCropper(object):
         self.h_rel_deadzone_half = float(h_rel_deadzone_half)
         self.grad_deadzone_half = float(grad_deadzone_half)
 
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = torch.device(device)
-        self._sobel_x = _SOBEL_X.to(self.device)
-        self._sobel_y = _SOBEL_Y.to(self.device)
-
         elevation = np.asarray(dem_data.raw_elevation_map, dtype=np.float32)
         finite = np.isfinite(elevation)
         if not finite.any():
@@ -255,9 +293,29 @@ class DsmPatchCropper(object):
             elevation = np.where(finite, elevation, fill).astype(np.float32)
 
         self.dem_h, self.dem_w = elevation.shape[:2]
-        self.dem_tensor = (
-            torch.from_numpy(elevation).to(self.device).unsqueeze(0).unsqueeze(0)
-        )
+        self.dem_tensor_bytes = int(elevation.nbytes)
+        target_device = _select_dem_tensor_device(device, self.dem_tensor_bytes)
+        dem_cpu_tensor = torch.from_numpy(elevation).unsqueeze(0).unsqueeze(0)
+        try:
+            self.dem_tensor = dem_cpu_tensor.to(target_device)
+        except RuntimeError as exc:
+            if target_device.type != "cuda":
+                raise
+            warnings.warn(
+                "Failed to move DSM tensor to '{}': {}; falling back to CPU.".format(
+                    str(target_device), exc
+                )
+            )
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            target_device = torch.device("cpu")
+            self.dem_tensor = dem_cpu_tensor.to(target_device)
+
+        self.device = target_device
+        self._sobel_x = _SOBEL_X.to(self.device)
+        self._sobel_y = _SOBEL_Y.to(self.device)
 
         self.rows = 0
         self.cols = 0

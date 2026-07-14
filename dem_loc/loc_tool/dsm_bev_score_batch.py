@@ -154,17 +154,12 @@ def compute_dsm_bev_score_batch(
     m_obs_b = m_obs.unsqueeze(0).expand(n, -1, -1)
 
     e_h = h_l_n.unsqueeze(0).expand(n, -1, -1) - h_d_n
-    lambda_h = torch.where(
-        h_l_n.unsqueeze(0).expand(n, -1, -1) > h_d_n,
-        torch.tensor(float(config.lambda_lidar_higher), device=device),
-        torch.tensor(float(config.lambda_dsm_higher), device=device),
-    )
     w_h = m_obs_b.float() * (
         float(config.w_h_base)
         + float(config.w_h_height)
         * torch.nan_to_num(h_l_n, nan=0.0).unsqueeze(0).expand(n, -1, -1)
     )
-    p_h = w_h * lambda_h * _huber_torch(e_h, config.delta_h)
+    p_h = w_h * float(config.lambda_lidar_higher) * _huber_torch(e_h, config.delta_h)
     j_h = _weighted_mean_batch(p_h, w_h, m_obs_b, config.eps)
     j_h = torch.nan_to_num(j_h, nan=0.0, posinf=1e6, neginf=1e6)
 

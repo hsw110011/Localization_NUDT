@@ -216,7 +216,16 @@ class ParticleFilter(object):
         self.score_config = score_config
         self.dsm_cropper = dsm_cropper
 
-        if torch.cuda.is_available() and str(pf_config.device).startswith("cuda"):
+        cropper_device = getattr(dsm_cropper, "device", None)
+        if cropper_device is not None:
+            self.device = torch.device(cropper_device)
+            if str(pf_config.device).startswith("cuda") and self.device.type != "cuda":
+                import warnings
+
+                warnings.warn(
+                    "DSM cropper is on CPU, particle filter falls back to CPU tensors."
+                )
+        elif torch.cuda.is_available() and str(pf_config.device).startswith("cuda"):
             self.device = torch.device(pf_config.device)
         else:
             self.device = torch.device("cpu")

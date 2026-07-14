@@ -3,15 +3,18 @@
 
 import math
 
+import numpy as np
+import torch
+
 from .cinterface import parse_lidar_bev_grid_map
 from .dsm_bev_score import (
     DsmBevScoreConfig,
     build_obs_mask,
-    compute_dsm_bev_score,
     compute_h_max,
-    dsm_layers_to_score_inputs,
     normalize_candidate_scores,
 )
+from .dsm_bev_score_batch import compute_dsm_bev_score_batch, lidar_layers_to_torch
+from .dsm_patch_batch import crop_batch_with_bev_layers
 
 PERTURB_DX_M = (-4.0, -2.0, 0.0, 2.0, 4.0)
 PERTURB_DY_M = (-4.0, -2.0, 0.0, 2.0, 4.0)
@@ -61,25 +64,116 @@ def perturb_pose_gauss_theta(gauss_x, gauss_y, theta, dx_m, dy_m, dtheta_deg):
     return px, py, float(theta) + math.radians(float(dtheta_deg))
 
 
-def score_at_pose(dsm_cropper, gauss_x, gauss_y, theta, lidar_layers, config=None, h_max=None):
+def _score_tensor_item_to_dict(score_batch, index, valid_pixel_num):
+    idx = int(index)
+    return {
+        "J_h": float(score_batch["J_h"][idx].detach().cpu().item()),
+        "J_gx": float(score_batch["J_gx"][idx].detach().cpu().item()),
+        "J_gy": float(score_batch["J_gy"][idx].detach().cpu().item()),
+        "J_total": float(score_batch["J_total"][idx].detach().cpu().item()),
+        "score": float(score_batch["score"][idx].detach().cpu().item()),
+        "weight": 1.0,
+        "H_max": float(score_batch["H_max"][idx].detach().cpu().item()),
+        "valid_pixel_num": int(valid_pixel_num),
+        "valid_grad_pixel_num": int(
+            score_batch["valid_grad_pixel_num"][idx].detach().cpu().item()
+        ),
+    }
+
+
+def _dsm_result_from_batch(dsm_cropper, dsm_batch, index):
+    idx = int(index)
+    layers = {
+        "H_rel_surf": dsm_batch["H_rel_surf"][idx].detach().cpu().numpy().astype(np.float32),
+        "G_long_L": dsm_batch["G_long_L"][idx].detach().cpu().numpy().astype(np.float32),
+        "G_lat_L": dsm_batch["G_lat_L"][idx].detach().cpu().numpy().astype(np.float32),
+    }
+    patch = dsm_batch["patches"][idx, 0]
+    center = patch[patch.shape[0] // 2, patch.shape[1] // 2]
+    layers["center_height"] = float(center.detach().cpu().item())
+    result = {
+        "patch": dsm_batch["patches"][idx : idx + 1],
+        "grid": dsm_batch["grid"][idx : idx + 1],
+        "shape": (dsm_cropper.rows, dsm_cropper.cols),
+        "resolution": dsm_cropper.resolution,
+        "map_size_x": dsm_cropper.map_size_x,
+        "map_size_y": dsm_cropper.map_size_y,
+        "layers": layers,
+        "elevation": layers["H_rel_surf"] + layers["center_height"],
+    }
+    result["vis_bgr"] = dsm_cropper.layers_to_vis_bgr(layers)
+    return result
+
+
+def _score_pose_batch(
+    dsm_cropper,
+    pose_rows,
+    lidar_layers,
+    config,
+    h_max=None,
+    return_dsm_results=True,
+):
+    device = dsm_cropper.device
+    particles = torch.as_tensor(pose_rows, dtype=torch.float32, device=device)
+    if particles.ndim != 2 or particles.shape[1] != 3:
+        raise ValueError("pose_rows must be [N, 3]")
+
+    valid_pixel_num = int(build_obs_mask(lidar_layers["M_obs"]).sum())
+    with torch.no_grad():
+        lidar_torch = lidar_layers_to_torch(lidar_layers, device)
+        dsm_batch = crop_batch_with_bev_layers(
+            dsm_cropper,
+            particles,
+            grad_cap=float(config.grad_cap),
+        )
+        score_batch = compute_dsm_bev_score_batch(
+            H_L=lidar_torch["H_L"],
+            Gx_L=lidar_torch["Gx_L"],
+            Gy_L=lidar_torch["Gy_L"],
+            M_obs=lidar_torch["M_obs"],
+            H_D=dsm_batch["H_rel_surf"],
+            Gx_D=float(config.dsm_lat_sign) * dsm_batch["G_lat_L"],
+            Gy_D=float(config.dsm_long_sign) * dsm_batch["G_long_L"],
+            config=config,
+            h_max=h_max,
+        )
+
+    scores = [
+        _score_tensor_item_to_dict(score_batch, idx, valid_pixel_num)
+        for idx in range(int(particles.shape[0]))
+    ]
+    if not return_dsm_results:
+        return scores, [None] * len(scores)
+    dsm_results = [
+        _dsm_result_from_batch(dsm_cropper, dsm_batch, idx)
+        for idx in range(int(particles.shape[0]))
+    ]
+    return scores, dsm_results
+
+
+def score_at_pose(
+    dsm_cropper,
+    gauss_x,
+    gauss_y,
+    theta,
+    lidar_layers,
+    config=None,
+    h_max=None,
+    return_dsm_result=True,
+):
     """在指定位姿裁剪 DSM patch 并与 LiDAR BEV 算分。"""
     if config is None:
         config = DsmBevScoreConfig()
 
-    dsm_result = dsm_cropper.crop_with_bev_layers(gauss_x, gauss_y, theta)
-    dsm_inputs = dsm_layers_to_score_inputs(dsm_result["layers"], config)
-    score = compute_dsm_bev_score(
-        H_L=lidar_layers["H_L"],
-        Gx_L=lidar_layers["Gx_L"],
-        Gy_L=lidar_layers["Gy_L"],
-        M_obs=lidar_layers["M_obs"],
-        H_D=dsm_inputs["H_D"],
-        Gx_D=dsm_inputs["Gx_D"],
-        Gy_D=dsm_inputs["Gy_D"],
-        config=config,
+    scores, dsm_results = _score_pose_batch(
+        dsm_cropper,
+        [[float(gauss_x), float(gauss_y), float(theta)]],
+        lidar_layers,
+        config,
         h_max=h_max,
+        return_dsm_results=return_dsm_result,
     )
-    return score, dsm_result
+    return scores[0], dsm_results[0]
 
 
 def score_global_and_local(
@@ -96,6 +190,7 @@ def score_global_and_local(
     local_heading_convention="math",
     lidar_layers=None,
     h_max=None,
+    return_dsm_results=True,
 ):
     """同一帧 LiDAR BEV 下，分别在 GlobalPose / LocalPose 位置算分。"""
     if score_config is None:
@@ -117,10 +212,6 @@ def score_global_and_local(
         heading_unit=global_heading_unit,
         heading_convention=global_heading_convention,
     )
-    global_score, global_dsm_result = score_at_pose(
-        dsm_cropper, g_gauss_x, g_gauss_y, g_theta, lidar_layers, score_config, h_max=h_max
-    )
-
     l_gauss_x, l_gauss_y, l_theta = local_pose_gauss_theta(
         coord_converter,
         local_pose,
@@ -128,9 +219,19 @@ def score_global_and_local(
         local_heading_unit=local_heading_unit,
         local_heading_convention=local_heading_convention,
     )
-    local_score, local_dsm_result = score_at_pose(
-        dsm_cropper, l_gauss_x, l_gauss_y, l_theta, lidar_layers, score_config, h_max=h_max
+    scores, dsm_results = _score_pose_batch(
+        dsm_cropper,
+        [
+            [g_gauss_x, g_gauss_y, g_theta],
+            [l_gauss_x, l_gauss_y, l_theta],
+        ],
+        lidar_layers,
+        score_config,
+        h_max=h_max,
+        return_dsm_results=return_dsm_results,
     )
+    global_score, local_score = scores
+    global_dsm_result, local_dsm_result = dsm_results
 
     return {
         "lidar_layers": lidar_layers,
@@ -176,21 +277,14 @@ def score_perturbation_grid(
         dtheta_deg_values = PERTURB_DTHETA_DEG
 
     candidates = []
+    pose_rows = []
     for dx in dx_values:
         for dy in dy_values:
             for dtheta_deg in dtheta_deg_values:
                 px, py, ptheta = perturb_pose_gauss_theta(
                     gauss_x, gauss_y, theta, dx, dy, dtheta_deg
                 )
-                score, dsm_result = score_at_pose(
-                    dsm_cropper,
-                    px,
-                    py,
-                    ptheta,
-                    lidar_layers,
-                    score_config,
-                    h_max=h_max,
-                )
+                pose_rows.append([px, py, ptheta])
                 candidates.append(
                     {
                         "dx_m": float(dx),
@@ -199,10 +293,19 @@ def score_perturbation_grid(
                         "gauss_x": px,
                         "gauss_y": py,
                         "theta": ptheta,
-                        "score_raw": score,
-                        "dsm_result": dsm_result,
                     }
                 )
+    scores, dsm_results = _score_pose_batch(
+        dsm_cropper,
+        pose_rows,
+        lidar_layers,
+        score_config,
+        h_max=h_max,
+        return_dsm_results=False,
+    )
+    for item, score, dsm_result in zip(candidates, scores, dsm_results):
+        item["score_raw"] = score
+        item["dsm_result"] = dsm_result
 
     normalized = normalize_candidate_scores(
         [item["score_raw"] for item in candidates],
