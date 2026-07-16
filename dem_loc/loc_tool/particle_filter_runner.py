@@ -90,7 +90,7 @@ def format_pf_log_line(frame_id, estimate):
         pf_best_score=float(estimate.get("max_score", float("nan"))),
         estimate=estimate,
         verbose=False,
-    ).strip().split("\n")[1]
+    ).strip()
 
 
 def format_pf_frame_log(
@@ -104,8 +104,7 @@ def format_pf_frame_log(
     local_score_detail=None,
     motion=None,
 ):
-    """多行帧日志：首行 Global/Local/PF 分数，随后 PF 状态，帧间用分界线分隔。"""
-    sep = "=" * 76
+    """单行打印 PF 最优粒子的三个直接评分项。"""
 
     def _fmt_score(value):
         if value is None:
@@ -118,111 +117,17 @@ def format_pf_frame_log(
         except (TypeError, ValueError):
             return "n/a"
 
-    lines = [
-        sep,
-        "[#{fid}]  Global={g}  Local={l}  PF_best={p}".format(
-            fid=int(frame_id),
-            g=_fmt_score(global_score),
-            l=_fmt_score(local_score),
-            p=_fmt_score(pf_best_score),
-        ),
-    ]
-
-    if verbose:
-        if global_score_detail is not None:
-            gs = global_score_detail
-            lines.append(
-                "  Global detail: J={jt:.4f}  n={n}  ng={ng}".format(
-                    jt=float(gs.get("J_total", float("nan"))),
-                    n=int(gs.get("valid_pixel_num", 0)),
-                    ng=int(gs.get("valid_grad_pixel_num", gs.get("valid_pixel_num", 0))),
-                )
-            )
-        if local_score_detail is not None:
-            ls = local_score_detail
-            lines.append(
-                "  Local  detail: J={jt:.4f}  n={n}  ng={ng}".format(
-                    jt=float(ls.get("J_total", float("nan"))),
-                    n=int(ls.get("valid_pixel_num", 0)),
-                    ng=int(ls.get("valid_grad_pixel_num", ls.get("valid_pixel_num", 0))),
-                )
-            )
-
-    if motion is not None:
-        speed_part = ""
-        if "speed_mps" in motion:
-            speed_part = "  speed={:.3f} m/s  scale={:.2f}".format(
-                float(motion.get("speed_mps", 0.0)),
-                float(motion.get("speed_noise_scale", 1.0)),
-            )
-        skip_part = "  stationary_skip=1" if motion.get("stationary_skip", False) else ""
-        lines.append(
-            "  odom  local=({dx:.3f}, {dy:.3f}) m  dyaw={dyaw:.4f} rad  "
-            "noise_std=({sx:.4f}, {sy:.4f}, {st:.4f}){speed}{skip}".format(
-                dx=float(motion.get("delta_local_x", 0.0)),
-                dy=float(motion.get("delta_local_y", 0.0)),
-                dyaw=float(motion.get("delta_yaw", 0.0)),
-                sx=float(motion.get("motion_std_lx", 0.0)),
-                sy=float(motion.get("motion_std_ly", 0.0)),
-                st=float(motion.get("motion_std_yaw", 0.0)),
-                speed=speed_part,
-                skip=skip_part,
-            )
-        )
-
-    lines.extend(
-        [
-            "-" * 76,
-            "  mode={mode}  resampled={rs}".format(
-                mode=str(estimate.get("estimate_mode", "?")),
-                rs=int(bool(estimate.get("resampled", False))),
-            ),
-            "  est   gauss=({x:.2f}, {y:.2f})  yaw={yaw:.3f} rad".format(
-                x=float(estimate["x_est"]),
-                y=float(estimate["y_est"]),
-                yaw=float(estimate["yaw_est"]),
-            ),
-            "  best  gauss=({bx:.2f}, {by:.2f})  yaw={byaw:.3f} rad  score={bs:.4f}".format(
-                bx=float(estimate["best_x"]),
-                by=float(estimate["best_y"]),
-                byaw=float(estimate.get("best_yaw", float("nan"))),
-                bs=float(estimate.get("best_score", estimate.get("max_score", float("nan")))),
-            ),
-            "  elite_k={ek}  neff={ne:.1f}  valid_scores={vc}".format(
-                ek=int(estimate.get("elite_count", 0)),
-                ne=float(estimate["neff"]),
-                vc=int(estimate.get("valid_score_count", 0)),
-            ),
-            "  spread  x={sx:.2f} m  y={sy:.2f} m  yaw={syaw:.3f} rad".format(
-                sx=float(estimate.get("spread_x", 0.0)),
-                sy=float(estimate.get("spread_y", 0.0)),
-                syaw=float(estimate.get("spread_yaw", 0.0)),
-            ),
-            "  weights  min={wmin:.2e}  max={wmax:.2e}".format(
-                wmin=float(estimate.get("weight_min", 0.0)),
-                wmax=float(estimate.get("weight_max", 0.0)),
-            ),
-            "  weight_math  mode={wm}  j_scale={js:.3e}  j_spread={jsp:.3e}  log_range={lr:.2f}".format(
-                wm=str(estimate.get("weight_mode", "")),
-                js=float(estimate.get("weight_j_scale", float("nan"))),
-                jsp=float(estimate.get("weight_j_spread", float("nan"))),
-                lr=float(estimate.get("weight_log_range", float("nan"))),
-            ),
-            "  J_total  [{jmin:.4f}, {jmax:.4f}]  mean={jmean:.4f}".format(
-                jmin=float(estimate.get("J_min", float("nan"))),
-                jmax=float(estimate.get("J_max", float("nan"))),
-                jmean=float(estimate.get("J_mean", float("nan"))),
-            ),
-            "  score    [{mn:.4f}, {mx:.4f}]  mean={ms:.4f}".format(
-                mn=float(estimate["min_score"]),
-                mx=float(estimate["max_score"]),
-                ms=float(estimate.get("mean_score", float("nan"))),
-            ),
-            sep,
-            "",
-        ]
+    return (
+        "PF particle score #{fid}: J_h={jh} J_gx={jgx} J_gy={jgy} "
+        "J={jt} score={sc}"
+    ).format(
+        fid=int(frame_id),
+        jh=_fmt_score(estimate.get("best_J_h", float("nan"))),
+        jgx=_fmt_score(estimate.get("best_J_gx", float("nan"))),
+        jgy=_fmt_score(estimate.get("best_J_gy", float("nan"))),
+        jt=_fmt_score(estimate.get("best_J_total", estimate.get("best_score", float("nan")))),
+        sc=_fmt_score(estimate.get("best_score_value", estimate.get("max_score", float("nan")))),
     )
-    return "\n".join(lines)
 
 
 class ParticleFilterRunner(object):

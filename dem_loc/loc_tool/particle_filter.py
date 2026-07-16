@@ -243,6 +243,9 @@ class ParticleFilter(object):
         self.weights = torch.full((n,), 1.0 / max(n, 1), dtype=torch.float32, device=self.device)
         self.scores = torch.zeros(n, dtype=torch.float32, device=self.device)
         self.j_totals = torch.zeros(n, dtype=torch.float32, device=self.device)
+        self.j_h = torch.zeros(n, dtype=torch.float32, device=self.device)
+        self.j_gx = torch.zeros(n, dtype=torch.float32, device=self.device)
+        self.j_gy = torch.zeros(n, dtype=torch.float32, device=self.device)
 
         self.initialized = False
         self.frame_id = 0
@@ -423,6 +426,9 @@ class ParticleFilter(object):
             "yaw": float(self.particles[idx, 2].item()),
             "score": float(self.scores[idx].item()),
             "J_total": float(self.j_totals[idx].item()),
+            "J_h": float(self.j_h[idx].item()),
+            "J_gx": float(self.j_gx[idx].item()),
+            "J_gy": float(self.j_gy[idx].item()),
         }
 
     def _compute_log_weights(self, j_total, score):
@@ -538,6 +544,9 @@ class ParticleFilter(object):
 
         j_total = batch_scores["J_total"]
         score = batch_scores["score"]
+        self.j_h = batch_scores["J_h"]
+        self.j_gx = batch_scores["J_gx"]
+        self.j_gy = batch_scores["J_gy"]
         self.j_totals = j_total
         self.scores = score
 
@@ -705,6 +714,11 @@ class ParticleFilter(object):
         spread_yaw = float(np.std(parts[:, 2]))
 
         best = self.particles[best_idx]
+        best_score_value = float(self.scores[best_idx].item())
+        best_j_total = float(self.j_totals[best_idx].item())
+        best_j_h = float(self.j_h[best_idx].item())
+        best_j_gx = float(self.j_gx[best_idx].item())
+        best_j_gy = float(self.j_gy[best_idx].item())
         finite_scores = self.scores[torch.isfinite(self.scores)]
         if finite_scores.numel() == 0:
             mean_score = min_score = max_score = 0.0
@@ -740,6 +754,11 @@ class ParticleFilter(object):
             "best_y": float(best[1].item()),
             "best_yaw": float(best[2].item()),
             "best_score": best_metric,
+            "best_score_value": best_score_value,
+            "best_J_h": best_j_h,
+            "best_J_gx": best_j_gx,
+            "best_J_gy": best_j_gy,
+            "best_J_total": best_j_total,
             "mean_score": mean_score,
             "min_score": min_score,
             "max_score": max_score,
