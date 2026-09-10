@@ -17,10 +17,10 @@ point_max_z: 200.0
 
 # Ego vehicle filtering in body frame.
 ego_filter_enabled: true
-ego_box_min_x: -3.0
+ego_box_min_x: -4.0
 ego_box_max_x: 2.0
-ego_box_min_y: -1.0
-ego_box_max_y: 1.0
+ego_box_min_y: -2.0
+ego_box_max_y: 2.0
 
 # Ground reference estimation.
 use_ransac_ground: true
