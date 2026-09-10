@@ -36,7 +36,7 @@ ground_failure_fallback_z: 0.0
 ground_min_points: 50
 
 # Height and gradient layers.
-surface_top_height_fraction: 0.15
+surface_top_height_fraction: 0.05
 height_quantile: 0.90
 h_rel_deadzone_half_width: 0.20
 grad_deadzone_half_width: 0.15

@@ -28,7 +28,7 @@
 namespace {
 
 constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
-constexpr double kSurfaceTopHeightFraction = 0.15;
+constexpr double kSurfaceTopHeightFraction = 0.05;
 constexpr std::size_t kMaxGroundHistoryFrames = 10;
 
 struct BevFrameSample {
@@ -256,10 +256,10 @@ public:
     const Eigen::Isometry3d current_pose =
       capture_pose_valid ? capture_pose : Eigen::Isometry3d::Identity();
     pruneFrameHistoryCellPointLimit(current_pose, capture_pose_valid);
-    const double ground_reference =
-      estimateGroundReferenceFromHistory(current_pose, capture_pose_valid);
-    last_ground_reference_ = ground_reference;
-    fillMapFromFrameHistory(current_pose, capture_pose_valid, ground_reference);
+    const double center_reference =
+      estimateCenterReferenceFromHistory(current_pose, capture_pose_valid);
+    last_ground_reference_ = center_reference;
+    fillMapFromFrameHistory(current_pose, capture_pose_valid, center_reference);
     if (config_.enable_spatial_height_smoothing &&
         config_.height_smoothing_radius > 0) {
       smoothRelativeHeightLayer();
@@ -671,7 +671,7 @@ private:
     const int max_top_height_count = config_.cell_max_points > 0
       ? std::max(1,
                  static_cast<int>(
-                   std::ceil(kSurfaceTopHeightFraction *
+                   std::ceil(config_.surface_top_height_fraction *
                              static_cast<double>(config_.cell_max_points))))
       : 0;
     const Eigen::Matrix3d current_rotation = current_pose.linear();
@@ -1068,13 +1068,12 @@ private:
     return z >= config_.ground_candidate_min_z && z <= config_.ground_candidate_max_z;
   }
 
-  double estimateGroundReferenceFromHistory(const Eigen::Isometry3d& current_pose,
+  double estimateCenterReferenceFromHistory(const Eigen::Isometry3d& current_pose,
                                             bool current_pose_valid) const
   {
-    const std::size_t reference_point_count =
-      static_cast<std::size_t>(config_.ground_min_points);
-    std::vector<std::pair<double, double>> ground_candidates;
-    ground_candidates.reserve(4096);
+    double nearest_distance_sq = std::numeric_limits<double>::infinity();
+    double nearest_height = config_.ground_failure_fallback_z;
+    bool found = false;
     int planar_count = 0;
 
     const Eigen::Matrix3d current_rotation = current_pose.linear();
@@ -1083,11 +1082,9 @@ private:
     const Eigen::Vector3d current_translation_inverse =
       -current_rotation_inverse * current_translation;
 
-    std::size_t frames_used = 0;
+    // Newest frames are visited first, so equal-distance points prefer recent data.
     for (auto frame_it = frame_history_.rbegin();
-         frame_it != frame_history_.rend() &&
-         frames_used < kMaxGroundHistoryFrames;
-         ++frame_it, ++frames_used) {
+         frame_it != frame_history_.rend(); ++frame_it) {
       const FrameObservation& frame = *frame_it;
       if (current_pose_valid != frame.pose_valid) {
         continue;
@@ -1114,37 +1111,23 @@ private:
         if (isGroundRoiPlanarPoint(local_x, local_y)) {
           ++planar_count;
         }
-        if (!isGroundRoiBodyPoint(local_x, local_y, local_z)) {
+        if (!std::isfinite(local_x) || !std::isfinite(local_y) ||
+            !std::isfinite(local_z)) {
           continue;
         }
+
         const double distance_sq = local_x * local_x + local_y * local_y;
-        ground_candidates.emplace_back(distance_sq, local_z);
+        if (distance_sq < nearest_distance_sq) {
+          nearest_distance_sq = distance_sq;
+          nearest_height = local_z;
+          found = true;
+        }
       }
     }
 
     last_ground_roi_planar_count_ = planar_count;
-    last_ground_roi_candidate_count_ =
-      static_cast<int>(ground_candidates.size());
-
-    if (ground_candidates.size() >= reference_point_count) {
-      const std::size_t used_count =
-        std::min(reference_point_count, ground_candidates.size());
-      std::nth_element(ground_candidates.begin(),
-                       ground_candidates.begin() +
-                         static_cast<std::ptrdiff_t>(used_count - 1),
-                       ground_candidates.end(),
-                       [](const auto& lhs, const auto& rhs) {
-                         return lhs.first < rhs.first;
-                       });
-
-      double z_sum = 0.0;
-      for (std::size_t i = 0; i < used_count; ++i) {
-        z_sum += ground_candidates[i].second;
-      }
-      return z_sum / static_cast<double>(used_count);
-    }
-
-    return config_.ground_failure_fallback_z;
+    last_ground_roi_candidate_count_ = found ? 1 : 0;
+    return found ? nearest_height : config_.ground_failure_fallback_z;
   }
 
   double meanTopHeightFraction(const std::vector<float>& values,
@@ -1571,7 +1554,7 @@ public:
     pnh_.param<bool>("ground_require_forward", config.ground_require_forward, true);
     pnh_.param<double>("ground_failure_fallback_z", config.ground_failure_fallback_z, 0.0);
     pnh_.param<int>("ground_min_points", config.ground_min_points, 30);
-    pnh_.param<double>("surface_top_height_fraction", config.surface_top_height_fraction, 0.15);
+    pnh_.param<double>("surface_top_height_fraction", config.surface_top_height_fraction, 0.05);
     pnh_.param<double>("h_rel_deadzone_half_width", config.h_rel_deadzone_half_width, 0.20);
     pnh_.param<double>("grad_deadzone_half_width", config.grad_deadzone_half_width, 0.15);
     pnh_.param<double>("grad_cap", config.grad_cap, 0.0);
