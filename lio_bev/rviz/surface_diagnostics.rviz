@@ -1,0 +1,68 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+  - Class: rviz/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 35; 35; 35
+    Fixed Frame: bev_local
+    Frame Rate: 30
+  Displays:
+    - Class: rviz/PointCloud2
+      Name: Road geometry - white, no height coloring
+      Enabled: true
+      Topic: /lidar_bev/debug/road_points
+      Queue Size: 1
+      Position Transformer: XYZ
+      Color Transformer: FlatColor
+      Color: 230; 230; 230
+      Alpha: 1
+      Style: Points
+      Size (Pixels): 3
+    - Class: rviz/PointCloud2
+      Name: Fitted plane - orange (toggle for comparison)
+      Enabled: false
+      Topic: /lidar_bev/debug/plane_points
+      Queue Size: 1
+      Position Transformer: XYZ
+      Color Transformer: FlatColor
+      Color: 255; 150; 30
+      Alpha: 0.6
+      Style: Points
+      Size (Pixels): 3
+    - Class: rviz/PointCloud2
+      Name: Plane residual - zero means planar (enable alone)
+      Enabled: false
+      Topic: /lidar_bev/debug/residual_points
+      Queue Size: 1
+      Position Transformer: XYZ
+      Color Transformer: Intensity
+      Channel Name: intensity
+      Autocompute Intensity Bounds: false
+      Min Intensity: -0.15
+      Max Intensity: 0.15
+      Use rainbow: true
+      Alpha: 1
+      Style: Points
+      Size (Pixels): 4
+  Tools:
+    - Class: rviz/Interact
+    - Class: rviz/MoveCamera
+    - Class: rviz/Select
+  Views:
+    Current:
+      Class: rviz/Orbit
+      Distance: 22
+      Pitch: 0.25
+      Yaw: 0.8
+      Target Frame: bev_local
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+  Name: root
+Window Geometry:
+  Width: 1280
+  Height: 800

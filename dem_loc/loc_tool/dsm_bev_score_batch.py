@@ -43,13 +43,13 @@ def _sanitize_h_max(h_max, config):
 
 
 def _weighted_mean_batch(values, weights, mask, eps):
-    """values/weights/mask: [N,H,W] -> [N]。"""
+    """Reduce only selected observation pixels: [N,P] -> [N]."""
     valid = mask & torch.isfinite(values) & torch.isfinite(weights) & (weights > 0.0)
     # values 已经是加权后的 penalty（例如 p_h = w_h * loss），这里与
     # dsm_bev_score._weighted_mean_over_obs 保持一致：sum(values) / sum(weights)。
     # 不能用 values * valid.float()：mask 外 NaN * 0 仍为 NaN，会污染 sum。
-    num = torch.where(valid, values, torch.zeros_like(values)).sum(dim=(1, 2))
-    den = torch.where(valid, weights, torch.zeros_like(weights)).sum(dim=(1, 2)) + float(eps)
+    num = torch.where(valid, values, torch.zeros_like(values)).sum(dim=1)
+    den = torch.where(valid, weights, torch.zeros_like(weights)).sum(dim=1) + float(eps)
     return num / den
 
 
@@ -120,70 +120,37 @@ def compute_dsm_bev_score_batch(
             "valid_grad_pixel_num": torch.zeros(n, device=device, dtype=torch.int32),
         }
 
-    h_l = torch.where(m_obs, H_L, torch.full_like(H_L, float("nan")))
-    h_d = torch.where(m_obs.unsqueeze(0), H_D, torch.full_like(H_D, float("nan")))
-    gx_l = torch.where(m_obs, Gx_L, torch.full_like(Gx_L, float("nan")))
-    gy_l = torch.where(m_obs, Gy_L, torch.full_like(Gy_L, float("nan")))
-    gx_d = torch.where(m_obs.unsqueeze(0), Gx_D, torch.full_like(Gx_D, float("nan")))
-    gy_d = torch.where(m_obs.unsqueeze(0), Gy_D, torch.full_like(Gy_D, float("nan")))
-
     if h_max is None:
         h_max_val = compute_h_max(H_L.detach().cpu().numpy(), m_obs.detach().cpu().numpy(), config)
     else:
         h_max_val = _sanitize_h_max(h_max, config)
-
     h_max_val = max(float(h_max_val), 1e-6)
 
-    h_l_n = _normalize_height_torch(h_l, h_max_val)
-    h_d_n = _normalize_height_torch(h_d, h_max_val)
-
-    gx_l_n = _normalize_gradient_torch(gx_l, config.grad_cap)
-    gy_l_n = _normalize_gradient_torch(gy_l, config.grad_cap)
-    gx_d_n = _normalize_gradient_torch(gx_d, config.grad_cap)
-    gy_d_n = _normalize_gradient_torch(gy_d, config.grad_cap)
-
-    m_grad = _erode_mask_torch(m_obs, config.grad_mask_erode_px, device)
-    m_grad_b = m_grad.unsqueeze(0).expand(n, -1, -1)
-    m_grad_b = (
-        m_grad_b
-        & torch.isfinite(gx_l_n).unsqueeze(0).expand(n, -1, -1)
-        & torch.isfinite(gx_d_n)
-        & torch.isfinite(gy_l_n).unsqueeze(0).expand(n, -1, -1)
-        & torch.isfinite(gy_d_n)
-    )
-    m_obs_b = m_obs.unsqueeze(0).expand(n, -1, -1)
-
-    e_h = h_l_n.unsqueeze(0).expand(n, -1, -1) - h_d_n
-    w_h = m_obs_b.float() * (
-        float(config.w_h_base)
-        + float(config.w_h_height)
-        * torch.nan_to_num(h_l_n, nan=0.0).unsqueeze(0).expand(n, -1, -1)
-    )
-    p_h = w_h * float(config.lambda_lidar_higher) * _huber_torch(e_h, config.delta_h)
-    j_h = _weighted_mean_batch(p_h, w_h, m_obs_b, config.eps)
+    # Unobserved pixels never contribute to the score. Gather before normalizing
+    # and allocating loss tensors; preserve all observed cells and their weights.
+    obs_idx = torch.nonzero(m_obs.reshape(-1), as_tuple=False).flatten()
+    h_l_n = _normalize_height_torch(H_L.reshape(-1)[obs_idx], h_max_val)
+    h_d_n = _normalize_height_torch(H_D.reshape(n, -1)[:, obs_idx], h_max_val)
+    w_h = float(config.w_h_base) + float(config.w_h_height) * torch.nan_to_num(h_l_n, nan=0.0)
+    p_h = w_h * float(config.lambda_lidar_higher) * _huber_torch(h_l_n - h_d_n, config.delta_h)
+    j_h = _weighted_mean_batch(p_h, w_h, torch.isfinite(h_d_n), config.eps)
     j_h = torch.nan_to_num(j_h, nan=0.0, posinf=1e6, neginf=1e6)
 
-    e_gx = gx_l_n.unsqueeze(0).expand(n, -1, -1) - gx_d_n
-    w_gx = torch.where(
-        m_grad_b,
-        float(config.w_g_base)
-        + (1.0 - float(config.w_g_base))
-        * torch.abs(torch.nan_to_num(gx_l_n, nan=0.0)).unsqueeze(0).expand(n, -1, -1),
-        torch.zeros((), device=device),
-    )
-    p_gx = w_gx * _huber_torch(e_gx, config.delta_g)
+    gx_l = _normalize_gradient_torch(Gx_L, config.grad_cap)
+    gy_l = _normalize_gradient_torch(Gy_L, config.grad_cap)
+    m_grad = _erode_mask_torch(m_obs, config.grad_mask_erode_px, device)
+    m_grad = m_grad & torch.isfinite(gx_l) & torch.isfinite(gy_l)
+    grad_idx = torch.nonzero(m_grad.reshape(-1), as_tuple=False).flatten()
+    gx_l_n, gy_l_n = gx_l.reshape(-1)[grad_idx], gy_l.reshape(-1)[grad_idx]
+    gx_d_n = _normalize_gradient_torch(Gx_D.reshape(n, -1)[:, grad_idx], config.grad_cap)
+    gy_d_n = _normalize_gradient_torch(Gy_D.reshape(n, -1)[:, grad_idx], config.grad_cap)
+    m_grad_b = torch.isfinite(gx_d_n) & torch.isfinite(gy_d_n)
+    w_gx = float(config.w_g_base) + (1.0 - float(config.w_g_base)) * torch.abs(gx_l_n)
+    p_gx = w_gx * _huber_torch(gx_l_n - gx_d_n, config.delta_g)
     j_gx = _weighted_mean_batch(p_gx, w_gx, m_grad_b, config.eps)
     j_gx = torch.nan_to_num(j_gx, nan=0.0, posinf=1e6, neginf=1e6)
-
-    e_gy = gy_l_n.unsqueeze(0).expand(n, -1, -1) - gy_d_n
-    w_gy = torch.where(
-        m_grad_b,
-        float(config.w_g_base)
-        + (1.0 - float(config.w_g_base))
-        * torch.abs(torch.nan_to_num(gy_l_n, nan=0.0)).unsqueeze(0).expand(n, -1, -1),
-        torch.zeros((), device=device),
-    )
-    p_gy = w_gy * _huber_torch(e_gy, config.delta_g)
+    w_gy = float(config.w_g_base) + (1.0 - float(config.w_g_base)) * torch.abs(gy_l_n)
+    p_gy = w_gy * _huber_torch(gy_l_n - gy_d_n, config.delta_g)
     j_gy = _weighted_mean_batch(p_gy, w_gy, m_grad_b, config.eps)
     j_gy = torch.nan_to_num(j_gy, nan=0.0, posinf=1e6, neginf=1e6)
 
@@ -203,5 +170,5 @@ def compute_dsm_bev_score_batch(
         "J_total": j_total,
         "score": score,
         "H_max": torch.full((n,), float(h_max_val), device=device, dtype=torch.float32),
-        "valid_grad_pixel_num": m_grad_b.sum(dim=(1, 2)).to(torch.int32),
+        "valid_grad_pixel_num": m_grad_b.sum(dim=1).to(torch.int32),
     }

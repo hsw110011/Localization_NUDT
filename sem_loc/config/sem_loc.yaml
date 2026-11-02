@@ -1,0 +1,22 @@
+%YAML:1.0
+---
+# 两个程序启动时直接读取此文件；修改后重启，不需要 launch。
+map_path: /home/hsw/catkin_ws/doc/kitti_raw_1003_0027.npz
+bev:
+  mode: "certain"               # certain | uncertain
+  resolution: 0.15
+  view_range: 60.0
+  visualize: 1                    # 1 显示 BEV 窗口，0 关闭
+  probability_channels: [0, 1, 2] # 2DPASS 已统一为 road / building / plant
+  input_cloud_in_world: 1        # /lio/cloud_world 已经在里程计 world frame
+  history_frames: 5            # 每格融合样本数上限；不是地图保留帧数
+  surface_band_m: 0.2           # 每帧只融合该格最高表面下该距离内的点
+  accumulation_update_distance_m: 0.5
+  accumulation_update_yaw_deg: 2.0
+  accumulation_max_interval_sec: 0.5
+particle_filter:
+  backend: "gpu"                 # gpu: GPU 批量并行 | forloop: CPU 逐粒子
+  method: "baseline"          # baseline | ours_no_entropy | ours_entropy
+  num_particles: 256
+  tdf_value_scale: 100.0           # 当前地图原始 TDF 截断值；已归一化地图填 1
+  score_lambda: 0.001             # log(w_post) = log(w_prior) - lambda * S

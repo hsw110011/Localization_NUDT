@@ -6,17 +6,25 @@ import math
 
 from self_state.msg import GlobalPose as GlobalPoseMsg
 
-from .coord_converter import _heading_to_math_deg
 from .cinterface import parse_lidar_bev_grid_map
-from .dsm_bev_score_runner import global_pose_gauss_theta
+from .dsm_bev_score_runner import global_pose_gauss_theta, local_pose_gauss_theta
 from .particle_filter import ParticleFilter
 
 
-def compute_odom_delta_local(local_pose, prev_local_x, prev_local_y):
-    """与 localization_python._update_odom_track 相同的局部位移增量。"""
-    delta_local_x = float(local_pose.dr_x) - float(prev_local_x)
-    delta_local_y = float(local_pose.dr_y) - float(prev_local_y)
-    return delta_local_x, delta_local_y
+def odometry_xy_yaw(odometry):
+    """nav_msgs/Odometry 在固定 LIO 坐标系中的位置与 math 弧度航向。"""
+    pose = odometry.pose.pose
+    q = pose.orientation
+    yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                     1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+    return float(pose.position.x), float(pose.position.y), yaw
+
+
+def body_translation_delta(prev_x, prev_y, prev_yaw, x, y):
+    """T_prev^-1 * T_now 的平移部分，属于上一帧车体坐标系。"""
+    dx, dy = float(x) - float(prev_x), float(y) - float(prev_y)
+    c, s = math.cos(float(prev_yaw)), math.sin(float(prev_yaw))
+    return c * dx + s * dy, -s * dx + c * dy
 
 
 def extract_local_speed_mps(local_pose):
@@ -37,26 +45,6 @@ def extract_local_speed_mps(local_pose):
     except (TypeError, ValueError):
         pass
     return 0.0
-
-
-def compute_local_heading_delta_rad(
-    local_pose,
-    prev_heading_rad,
-    local_heading_unit="deg",
-    local_heading_convention="math",
-):
-    """LocalPose.dr_heading 增量（math 弧度）。"""
-    heading_deg = _heading_to_math_deg(
-        local_pose.dr_heading,
-        local_heading_unit,
-        local_heading_convention,
-    )
-    heading_rad = math.radians(float(heading_deg))
-    if prev_heading_rad is None:
-        return 0.0, heading_rad
-    delta = float(heading_rad) - float(prev_heading_rad)
-    delta = math.atan2(math.sin(delta), math.cos(delta))
-    return delta, heading_rad
 
 
 def gauss_pose_to_global_pose_msg(
@@ -156,83 +144,74 @@ class ParticleFilterRunner(object):
         self.pf = ParticleFilter(pf_config, score_config, dsm_cropper)
         self.initialized = False
         self.pending_propagation = False
-        self.odom_theta = 0.0
-        self.prev_local_x = 0.0
-        self.prev_local_y = 0.0
-        self.prev_local_heading_rad = None
+        self.prev_odom_yaw = 0.0
+        self.prev_motion_heading = 0.0
+        self.prev_odom_x = 0.0
+        self.prev_odom_y = 0.0
         self.last_delta_local = (0.0, 0.0)
-        self.last_delta_yaw = 0.0
         self.update_count = 0
         self.last_lidar_layers = None
         self.last_speed_mps = 0.0
         self.stationary = False
 
-    def initialize_from_global_pose(self, global_pose):
-        gauss_x, gauss_y, theta = global_pose_gauss_theta(
-            self.coord_converter,
-            global_pose,
+    def initialize(self, global_pose, local_pose, local_pose_base, odometry):
+        gauss_x, gauss_y, _ = global_pose_gauss_theta(
+            self.coord_converter, global_pose,
             heading_unit=self.global_heading_unit,
             heading_convention=self.global_heading_convention,
         )
-        self.pf.initialize(gauss_x, gauss_y, theta)
+        self.local_pose_base = local_pose_base
+        _, _, heading = local_pose_gauss_theta(
+            self.coord_converter, local_pose, local_pose_base,
+            local_heading_unit=self.local_heading_unit,
+            local_heading_convention=self.local_heading_convention,
+        )
+        self.pf.initialize(gauss_x, gauss_y, heading)
+        self.prev_odom_x, self.prev_odom_y, self.prev_odom_yaw = odometry_xy_yaw(odometry)
+        # This heading belongs to the previous odometry sample, not to the
+        # latest LocalPose callback received before the next motion update.
+        self.prev_motion_heading = self.pf.heading_rad
         self.initialized = True
         self.pending_propagation = False
-        self.prev_local_heading_rad = None
-        return gauss_x, gauss_y, theta
-
-    def set_odom_anchor(self, odom_theta, prev_local_x, prev_local_y):
-        self.odom_theta = float(odom_theta)
-        self.prev_local_x = float(prev_local_x)
-        self.prev_local_y = float(prev_local_y)
+        self.on_local_pose(local_pose)
+        return gauss_x, gauss_y, heading
 
     def on_local_pose(self, local_pose):
         if not self.initialized:
             return False
-        delta_local_x, delta_local_y = compute_odom_delta_local(
-            local_pose, self.prev_local_x, self.prev_local_y
-        )
-        delta_yaw, heading_rad = compute_local_heading_delta_rad(
-            local_pose,
-            self.prev_local_heading_rad,
+        _, _, heading = local_pose_gauss_theta(
+            self.coord_converter, local_pose, self.local_pose_base,
             local_heading_unit=self.local_heading_unit,
             local_heading_convention=self.local_heading_convention,
         )
-        speed_mps = extract_local_speed_mps(local_pose)
-        self.last_speed_mps = speed_mps
-        self.last_delta_local = (delta_local_x, delta_local_y)
-        self.last_delta_yaw = float(delta_yaw)
-        stationary = speed_mps <= float(self.pf_config.stationary_speed_threshold)
-        self.stationary = bool(stationary)
-        if stationary:
-            self.prev_local_x = float(local_pose.dr_x)
-            self.prev_local_y = float(local_pose.dr_y)
-            self.prev_local_heading_rad = heading_rad
+        # Also update heading while stationary; neither position nor yaw is
+        # propagated from LocalPose's dr_x/dr_y or from LIO orientation deltas.
+        self.pf.set_heading(heading)
+        self.last_speed_mps = extract_local_speed_mps(local_pose)
+        self.stationary = self.last_speed_mps <= float(self.pf_config.stationary_speed_threshold)
+        return True
+
+    def on_odometry(self, odometry):
+        if not self.initialized:
+            return False
+        x, y, yaw = odometry_xy_yaw(odometry)
+        dx, dy = body_translation_delta(self.prev_odom_x, self.prev_odom_y,
+                                        self.prev_odom_yaw, x, y)
+        previous_heading = self.prev_motion_heading
+        self.prev_odom_x, self.prev_odom_y, self.prev_odom_yaw = x, y, yaw
+        self.prev_motion_heading = self.pf.heading_rad
+        self.last_delta_local = (dx, dy)
+        if self.stationary:
             self.pending_propagation = False
             self.pf.last_motion = {
-                "delta_local_x": delta_local_x,
-                "delta_local_y": delta_local_y,
-                "delta_yaw": delta_yaw,
-                "delta_global_x": 0.0,
-                "delta_global_y": 0.0,
-                "motion_std_lx": 0.0,
-                "motion_std_ly": 0.0,
-                "motion_std_yaw": 0.0,
-                "speed_mps": speed_mps,
-                "speed_noise_scale": 1.0,
+                "delta_local_x": dx, "delta_local_y": dy, "delta_yaw": 0.0,
+                "delta_global_x": 0.0, "delta_global_y": 0.0,
+                "motion_std_lx": 0.0, "motion_std_ly": 0.0, "motion_std_yaw": 0.0,
+                "speed_mps": self.last_speed_mps, "speed_noise_scale": 1.0,
                 "stationary_skip": True,
             }
             return False
-
-        self.pf.propagate(
-            delta_local_x,
-            delta_local_y,
-            self.odom_theta,
-            delta_yaw=delta_yaw,
-            speed_mps=speed_mps,
-        )
-        self.prev_local_x = float(local_pose.dr_x)
-        self.prev_local_y = float(local_pose.dr_y)
-        self.prev_local_heading_rad = heading_rad
+        self.pf.propagate(dx, dy, previous_heading, speed_mps=self.last_speed_mps)
         self.pending_propagation = True
         return True
 

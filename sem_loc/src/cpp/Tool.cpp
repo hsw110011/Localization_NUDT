@@ -33,7 +33,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
             {
                 std::cout << "[Warning] semantic_map unknown dtype size: " << arr.word_size << std::endl;
             }
-            std::cout << "[Info] Loaded semantic_map: " << out_data.semantic_map.size() << " Channels: " << out_data.semantic_map.channels() << std::endl;
+            ROS_DEBUG_STREAM("[Info] Loaded semantic_map: " << out_data.semantic_map.size() << " Channels: " << out_data.semantic_map.channels());
         }
 
         // 3. 读取 TDF Map (H, W, N)
@@ -57,7 +57,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
                  memcpy(temp.data, arr.data<double>(), arr.num_bytes());
                  temp.convertTo(out_data.tdf_map, CV_32F); // 统一转为 float32 方便后续处理
             }
-            std::cout << "[Info] Loaded tdf_map: " << out_data.tdf_map.size() << " Channels: " << out_data.tdf_map.channels() << std::endl;
+            ROS_DEBUG_STREAM("[Info] Loaded tdf_map: " << out_data.tdf_map.size() << " Channels: " << out_data.tdf_map.channels());
         }
 
         // 4. 读取 Geo Bounds
@@ -78,9 +78,6 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
                 for(size_t i=0; i<num; i++) out_data.geo_bounds[i] = (double)data[i];
             }
 
-            std::cout << "[Info] Loaded geo_bounds: [";
-            for(auto v : out_data.geo_bounds) std::cout << v << " ";
-            std::cout << "]" << std::endl;
         }
 
         // 5. 读取 Gauss Origin X
@@ -89,7 +86,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
             cnpy::NpyArray& arr = arrays["Origin_X"];
             if (arr.word_size == 8) out_data.origin_x = arr.data<double>()[0];
             else if (arr.word_size == 4) out_data.origin_x = (double)arr.data<float>()[0];
-            std::cout << "[Info] Loaded Origin_X: " << out_data.origin_x << std::endl;
+            ROS_DEBUG_STREAM("[Info] Loaded Origin_X: " << out_data.origin_x);
         }
 
         // 6. 读取 Gauss Origin Y
@@ -98,7 +95,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
             cnpy::NpyArray& arr = arrays["Origin_Y"];
             if (arr.word_size == 8) out_data.origin_y = arr.data<double>()[0];
             else if (arr.word_size == 4) out_data.origin_y = (double)arr.data<float>()[0];
-            std::cout << "[Info] Loaded Origin_Y: " << out_data.origin_y << std::endl;
+            ROS_DEBUG_STREAM("[Info] Loaded Origin_Y: " << out_data.origin_y);
         }
 
         // 7. 读取 Resolution
@@ -107,7 +104,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
             cnpy::NpyArray& arr = arrays["Resolution"];
             if (arr.word_size == 8) out_data.resolution = arr.data<double>()[0];
             else if (arr.word_size == 4) out_data.resolution = (double)arr.data<float>()[0];
-            std::cout << "[Info] Loaded Resolution: " << out_data.resolution << std::endl;
+            ROS_DEBUG_STREAM("[Info] Loaded Resolution: " << out_data.resolution);
         }
 
         // 8. 读取 Zone Num
@@ -117,7 +114,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
             // Zone Num 通常是 int，但 numpy 可能存成 long/int64
             if (arr.word_size == 8) out_data.zone_num = (int)arr.data<long>()[0]; // int64
             else if (arr.word_size == 4) out_data.zone_num = arr.data<int>()[0];   // int32
-            std::cout << "[Info] Loaded Zone_Num: " << out_data.zone_num << std::endl;
+            ROS_DEBUG_STREAM("[Info] Loaded Zone_Num: " << out_data.zone_num);
         }
 
         // 9. 读取 Satellite Map (H, W, 3) - RGB/BGR
@@ -138,7 +135,7 @@ bool Tool::LoadSatelliteNpz(const std::string& npz_path, SatelliteData& out_data
             {
                 std::cout << "[Warning] satellite_map unknown dtype size: " << arr.word_size << std::endl;
             }
-            std::cout << "[Info] Loaded satellite_map: " << out_data.satellite_map.size() << " Channels: " << out_data.satellite_map.channels() << std::endl;
+            ROS_DEBUG_STREAM("[Info] Loaded satellite_map: " << out_data.satellite_map.size() << " Channels: " << out_data.satellite_map.channels());
         }
 
         out_data.is_valid = !out_data.semantic_map.empty();

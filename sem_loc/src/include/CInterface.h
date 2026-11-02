@@ -12,9 +12,10 @@
 class CInterface
 {
 public:
-    CInterface(ros::NodeHandle nh);
+    CInterface(ros::NodeHandle nh, bool certain);
     ~CInterface();
     bool ConvertToLocalData(InputData *input);
+    ros::Time LastGnssReception() const { return last_gnss_reception_; }
 
 
 private:
@@ -87,6 +88,7 @@ private:
 
 
     ros::NodeHandle nh;
+    ros::Time last_gnss_reception_;
 
     bool LidarLocalPose_refreshflag;
     bool LocalPose_refreshflag;

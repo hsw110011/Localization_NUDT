@@ -15,10 +15,6 @@ from .dsm_patch_batch import crop_batch_with_bev_layers
 from .particle_weight_vis import save_particle_weight_view
 
 
-def _normalize_angle(yaw):
-    return torch.atan2(torch.sin(yaw), torch.cos(yaw))
-
-
 def _percentile_1d(values, q):
     values = values.flatten()
     if values.numel() == 0:
@@ -32,17 +28,15 @@ def _percentile_1d(values, q):
 @dataclass
 class ParticleFilterConfig(object):
     enable: bool = False
-    num_particles: int = 256
+    num_particles: int = 128
     random_seed: int = 42
     device: str = "cuda:0"
 
     init_std_x: float = 8.0
     init_std_y: float = 8.0
-    init_std_yaw: float = 0.10
 
     motion_std_x: float = 0.30  # 平移噪声系数：std_x = coeff * |delta_x| (m)
     motion_std_y: float = 0.15  # 横向噪声系数：std_y = coeff * (|delta_y| + 0.5 * |delta_x|)
-    motion_std_yaw: float = 0.004  # std_yaw = coeff * |delta_yaw| (rad)
     stationary_speed_threshold: float = 0.05  # LocalPose.vehicle_speed 低于该值时跳过 PF 更新
     motion_speed_noise_gain: float = 0.10  # 速度噪声放大：std *= 1 + gain * |speed_mps|
 
@@ -65,7 +59,6 @@ class ParticleFilterConfig(object):
     enable_roughening: bool = True
     roughening_std_x: float = 0.02
     roughening_std_y: float = 0.02
-    roughening_std_yaw: float = 0.001
 
     save_debug: bool = True
     save_particle_csv: bool = False
@@ -88,15 +81,13 @@ def load_particle_filter_config(get_param):
 
     return ParticleFilterConfig(
         enable=bool(_p("pf_enable", False)),
-        num_particles=int(_p("pf_num_particles", 256)),
+        num_particles=int(_p("pf_num_particles", 128)),
         random_seed=int(_p("pf_random_seed", 42)),
         device=str(_p("pf_device", "cuda:0")),
         init_std_x=float(_p("pf_init_std_x", 8.0)),
         init_std_y=float(_p("pf_init_std_y", 8.0)),
-        init_std_yaw=float(_p("pf_init_std_yaw", 0.10)),
         motion_std_x=float(_p("pf_motion_std_x", 0.30)),
         motion_std_y=float(_p("pf_motion_std_y", 0.15)),
-        motion_std_yaw=float(_p("pf_motion_std_yaw", 0.004)),
         stationary_speed_threshold=float(_p("pf_stationary_speed_threshold", 0.05)),
         motion_speed_noise_gain=float(_p("pf_motion_speed_noise_gain", 0.10)),
         score_is_cost=bool(_p("pf_score_is_cost", True)),
@@ -113,7 +104,6 @@ def load_particle_filter_config(get_param):
         enable_roughening=bool(_p("pf_enable_roughening", True)),
         roughening_std_x=float(_p("pf_roughening_std_x", 0.02)),
         roughening_std_y=float(_p("pf_roughening_std_y", 0.02)),
-        roughening_std_yaw=float(_p("pf_roughening_std_yaw", 0.001)),
         save_debug=bool(_p("pf_save_debug", True)),
         save_particle_csv=bool(_p("pf_save_particle_csv", False)),
         save_score_csv=bool(_p("pf_save_score_csv", True)),
@@ -145,10 +135,8 @@ def load_particle_filter_ini_defaults(ini_path):
         "device": "pf_device",
         "init_std_x": "pf_init_std_x",
         "init_std_y": "pf_init_std_y",
-        "init_std_yaw": "pf_init_std_yaw",
         "motion_std_x": "pf_motion_std_x",
         "motion_std_y": "pf_motion_std_y",
-        "motion_std_yaw": "pf_motion_std_yaw",
         "stationary_speed_threshold": "pf_stationary_speed_threshold",
         "motion_speed_noise_gain": "pf_motion_speed_noise_gain",
         "score_is_cost": "pf_score_is_cost",
@@ -165,7 +153,6 @@ def load_particle_filter_ini_defaults(ini_path):
         "enable_roughening": "pf_enable_roughening",
         "roughening_std_x": "pf_roughening_std_x",
         "roughening_std_y": "pf_roughening_std_y",
-        "roughening_std_yaw": "pf_roughening_std_yaw",
         "save_debug": "pf_save_debug",
         "save_particle_csv": "pf_save_particle_csv",
         "save_score_csv": "pf_save_score_csv",
@@ -209,7 +196,7 @@ def load_particle_filter_ini_defaults(ini_path):
 
 
 class ParticleFilter(object):
-    """DSM-LiDAR 粒子滤波器。"""
+    """DSM-LiDAR x/y 粒子滤波器；粒子第三列是共用的外部航向。"""
 
     def __init__(self, pf_config, score_config, dsm_cropper):
         self.pf_config = pf_config
@@ -239,7 +226,8 @@ class ParticleFilter(object):
         self.torch_gen.manual_seed(int(pf_config.random_seed))
 
         n = int(pf_config.num_particles)
-        self.particles = torch.zeros((n, 3), dtype=torch.float32, device=self.device)
+        # Absolute UTM states need Float64; dense patch/score tensors stay Float32.
+        self.particles = torch.zeros((n, 3), dtype=torch.float64, device=self.device)
         self.weights = torch.full((n,), 1.0 / max(n, 1), dtype=torch.float32, device=self.device)
         self.scores = torch.zeros(n, dtype=torch.float32, device=self.device)
         self.j_totals = torch.zeros(n, dtype=torch.float32, device=self.device)
@@ -317,15 +305,12 @@ class ParticleFilter(object):
     def initialize(self, gauss_x, gauss_y, yaw_rad):
         n = int(self.pf_config.num_particles)
         cfg = self.pf_config
-        noise = self.rng.normal(
-            0.0,
-            [cfg.init_std_x, cfg.init_std_y, cfg.init_std_yaw],
-            size=(n, 3),
-        ).astype(np.float32)
-        state = np.array([float(gauss_x), float(gauss_y), float(yaw_rad)], dtype=np.float32)
-        particles = state.reshape(1, 3) + noise
-        particles[:, 2] = np.arctan2(np.sin(particles[:, 2]), np.cos(particles[:, 2]))
-        self.particles = torch.as_tensor(particles, dtype=torch.float32, device=self.device)
+        noise = self.rng.normal(0.0, [cfg.init_std_x, cfg.init_std_y], size=(n, 2))
+        state = np.array([float(gauss_x), float(gauss_y), float(yaw_rad)], dtype=np.float64)
+        particles = np.tile(state, (n, 1))
+        particles[:, :2] += noise
+        self.particles = torch.as_tensor(particles, dtype=torch.float64, device=self.device)
+        self.set_heading(yaw_rad)
         self.weights.fill_(1.0 / max(n, 1))
         self.scores.zero_()
         self.j_totals.zero_()
@@ -335,15 +320,19 @@ class ParticleFilter(object):
         self.h_max = None
         self._lidar_torch = None
 
-    def propagate(self, delta_local_x, delta_local_y, odom_theta, delta_yaw=0.0, speed_mps=0.0):
-        """里程计位移 + 航向增量传播；运动噪声与位移和速度正相关。"""
+    def set_heading(self, yaw_rad):
+        """LocalPose 航向是所有粒子共用的已知输入，不参与滤波。"""
+        self.heading_rad = math.atan2(math.sin(float(yaw_rad)), math.cos(float(yaw_rad)))
+        self.particles[:, 2] = self.heading_rad
+
+    def propagate(self, delta_local_x, delta_local_y, previous_heading, speed_mps=0.0):
+        """车体局部位移及噪声按上一帧 LocalPose 全局航向旋转，只传播 x/y。"""
         if not self.initialized:
             return
 
         cfg = self.pf_config
         dx = float(delta_local_x)
         dy = float(delta_local_y)
-        dyaw = float(delta_yaw)
         try:
             speed = abs(float(speed_mps))
             if not math.isfinite(speed):
@@ -351,33 +340,29 @@ class ParticleFilter(object):
         except (TypeError, ValueError):
             speed = 0.0
         speed_noise_scale = 1.0 + max(0.0, float(cfg.motion_speed_noise_gain)) * speed
-        cos_t = math.cos(float(odom_theta))
-        sin_t = math.sin(float(odom_theta))
+        cos_t = math.cos(float(previous_heading))
+        sin_t = math.sin(float(previous_heading))
         delta_global_x = dx * cos_t - dy * sin_t
         delta_global_y = dx * sin_t + dy * cos_t
 
         self.particles[:, 0] += delta_global_x
         self.particles[:, 1] += delta_global_y
-        if abs(dyaw) > 1e-12:
-            self.particles[:, 2] += dyaw
 
         longitudinal_motion = abs(dx)
         lateral_motion = abs(dy)
         lateral_motion_with_forward = lateral_motion + 0.5 * longitudinal_motion
         std_lx = float(cfg.motion_std_x) * longitudinal_motion * speed_noise_scale
         std_ly = float(cfg.motion_std_y) * lateral_motion_with_forward * speed_noise_scale
-        std_yaw = float(cfg.motion_std_yaw) * abs(dyaw) * speed_noise_scale
-        if std_lx <= 0.0 and std_ly <= 0.0 and std_yaw <= 0.0:
-            self.particles[:, 2] = _normalize_angle(self.particles[:, 2])
+        if std_lx <= 0.0 and std_ly <= 0.0:
             self.last_motion = {
                 "delta_local_x": dx,
                 "delta_local_y": dy,
-                "delta_yaw": dyaw,
+                "delta_yaw": 0.0,
                 "delta_global_x": delta_global_x,
                 "delta_global_y": delta_global_y,
                 "motion_std_lx": std_lx,
                 "motion_std_ly": std_ly,
-                "motion_std_yaw": std_yaw,
+                "motion_std_yaw": 0.0,
                 "speed_mps": speed,
                 "speed_noise_scale": speed_noise_scale,
                 "stationary_skip": False,
@@ -385,7 +370,7 @@ class ParticleFilter(object):
             return
 
         motion_noise = torch.randn(
-            self.particles.shape,
+            (int(self.particles.shape[0]), 2),
             generator=self.torch_gen,
             device=self.device,
             dtype=torch.float32,
@@ -394,18 +379,16 @@ class ParticleFilter(object):
         noise_ly = motion_noise[:, 1] * std_ly
         motion_noise[:, 0] = noise_lx * cos_t - noise_ly * sin_t
         motion_noise[:, 1] = noise_lx * sin_t + noise_ly * cos_t
-        motion_noise[:, 2] *= std_yaw
-        self.particles += motion_noise
-        self.particles[:, 2] = _normalize_angle(self.particles[:, 2])
+        self.particles[:, :2] += motion_noise
         self.last_motion = {
             "delta_local_x": dx,
             "delta_local_y": dy,
-            "delta_yaw": dyaw,
+            "delta_yaw": 0.0,
             "delta_global_x": delta_global_x,
             "delta_global_y": delta_global_y,
             "motion_std_lx": std_lx,
             "motion_std_ly": std_ly,
-            "motion_std_yaw": std_yaw,
+            "motion_std_yaw": 0.0,
             "speed_mps": speed,
             "speed_noise_scale": speed_noise_scale,
             "stationary_skip": False,
@@ -420,16 +403,13 @@ class ParticleFilter(object):
 
     def _cache_best_vis(self, bi):
         idx = int(bi)
-        self.last_best_vis = {
-            "gauss_x": float(self.particles[idx, 0].item()),
-            "gauss_y": float(self.particles[idx, 1].item()),
-            "yaw": float(self.particles[idx, 2].item()),
-            "score": float(self.scores[idx].item()),
-            "J_total": float(self.j_totals[idx].item()),
-            "J_h": float(self.j_h[idx].item()),
-            "J_gx": float(self.j_gx[idx].item()),
-            "J_gy": float(self.j_gy[idx].item()),
-        }
+        values = torch.cat((
+            self.particles[idx],
+            torch.stack((self.scores[idx], self.j_totals[idx], self.j_h[idx], self.j_gx[idx], self.j_gy[idx])).to(self.particles.dtype),
+        )).detach().cpu().tolist()
+        self.last_best_vis = dict(zip(
+            ("gauss_x", "gauss_y", "yaw", "score", "J_total", "J_h", "J_gx", "J_gy"), values,
+        ))
 
     def _compute_log_weights(self, j_total, score):
         cfg = self.pf_config
@@ -512,35 +492,33 @@ class ParticleFilter(object):
         self.last_weight_debug = debug
         return log_weights
 
+    def _score_particles(self, particles):
+        dsm = crop_batch_with_bev_layers(
+            self.dsm_cropper, particles, grad_cap=self.score_config.grad_cap,
+        )
+        lt = self._lidar_torch
+        return compute_dsm_bev_score_batch(
+            lt["H_L"], lt["Gx_L"], lt["Gy_L"], lt["M_obs"],
+            dsm["H_rel_surf"],
+            dsm["G_lat_L"] * float(self.score_config.dsm_lat_sign),
+            dsm["G_long_L"] * float(self.score_config.dsm_long_sign),
+            config=self.score_config, h_max=self.h_max,
+        )
+
     def update(self, lidar_layers, h_max=None):
         if not self.initialized:
             raise RuntimeError("particle filter not initialized")
 
         self._prepare_lidar(lidar_layers, h_max=h_max)
-        lt = self._lidar_torch
         n = int(self.particles.shape[0])
-
         with torch.inference_mode():
-            dsm = crop_batch_with_bev_layers(
-                self.dsm_cropper,
-                self.particles,
-                grad_cap=self.score_config.grad_cap,
-            )
-            h_d = dsm["H_rel_surf"]
-            g_long = dsm["G_long_L"] * float(self.score_config.dsm_long_sign)
-            g_lat = dsm["G_lat_L"] * float(self.score_config.dsm_lat_sign)
-
-            batch_scores = compute_dsm_bev_score_batch(
-                lt["H_L"],
-                lt["Gx_L"],
-                lt["Gy_L"],
-                lt["M_obs"],
-                h_d,
-                g_lat,
-                g_long,
-                config=self.score_config,
-                h_max=self.h_max,
-            )
+            # Bound intermediate GPU allocations. All particles are still scored
+            # against the same frame before one posterior-weight update.
+            batches = [self._score_particles(p) for p in self.particles.split(32)]
+            batch_scores = {
+                key: torch.cat([batch[key] for batch in batches])
+                for key in batches[0]
+            }
 
         j_total = batch_scores["J_total"]
         score = batch_scores["score"]
@@ -611,16 +589,14 @@ class ParticleFilter(object):
         cfg = self.pf_config
         if cfg.enable_roughening:
             noise = torch.randn(
-                self.particles.shape,
+                (int(self.particles.shape[0]), 2),
                 generator=self.torch_gen,
                 device=self.device,
                 dtype=torch.float32,
             )
             noise[:, 0] *= float(cfg.roughening_std_x)
             noise[:, 1] *= float(cfg.roughening_std_y)
-            noise[:, 2] *= float(cfg.roughening_std_yaw)
-            self.particles += noise
-            self.particles[:, 2] = _normalize_angle(self.particles[:, 2])
+            self.particles[:, :2] += noise
         return True
 
     def maybe_resample(self):
@@ -642,7 +618,7 @@ class ParticleFilter(object):
                 device=self.device,
             )
         else:
-            w = torch.nan_to_num(weights[indices], nan=0.0, posinf=0.0, neginf=0.0)
+            w = torch.nan_to_num(weights[indices].to(sel.dtype), nan=0.0, posinf=0.0, neginf=0.0)
             w = torch.clamp(w, min=0.0)
             w_sum = torch.sum(w)
             if (not torch.isfinite(w_sum)) or float(w_sum.item()) <= 1e-12:
@@ -654,12 +630,10 @@ class ParticleFilter(object):
                 )
             else:
                 w = w / w_sum
-        x = float(torch.sum(w * sel[:, 0]).item())
-        y = float(torch.sum(w * sel[:, 1]).item())
-        sin_sum = float(torch.sum(w * torch.sin(sel[:, 2])).item())
-        cos_sum = float(torch.sum(w * torch.cos(sel[:, 2])).item())
-        yaw = float(math.atan2(sin_sum, cos_sum))
-        return x, y, yaw
+        x, y = torch.stack((
+            torch.sum(w * sel[:, 0]), torch.sum(w * sel[:, 1]),
+        )).detach().cpu().tolist()
+        return x, y, self.heading_rad
 
     def _elite_indices(self):
         n = int(self.particles.shape[0])
@@ -672,7 +646,7 @@ class ParticleFilter(object):
         return torch.topk(metric, k, largest=True).indices
 
     def estimate_pose(self):
-        w = torch.nan_to_num(self.weights, nan=0.0, posinf=0.0, neginf=0.0)
+        w = torch.nan_to_num(self.weights.to(self.particles.dtype), nan=0.0, posinf=0.0, neginf=0.0)
         w_sum = torch.sum(w)
         if (not torch.isfinite(w_sum)) or float(w_sum.item()) <= 1e-12:
             n = int(self.particles.shape[0])
@@ -680,11 +654,10 @@ class ParticleFilter(object):
         else:
             w = w / w_sum
 
-        x_w = float(torch.sum(w * self.particles[:, 0]).item())
-        y_w = float(torch.sum(w * self.particles[:, 1]).item())
-        sin_w = float(torch.sum(w * torch.sin(self.particles[:, 2])).item())
-        cos_w = float(torch.sum(w * torch.cos(self.particles[:, 2])).item())
-        yaw_w = float(math.atan2(sin_w, cos_w))
+        x_w, y_w = torch.stack((
+            torch.sum(w * self.particles[:, 0]), torch.sum(w * self.particles[:, 1]),
+        )).detach().cpu().tolist()
+        yaw_w = self.heading_rad
 
         elite_idx = self._elite_indices()
         x_e, y_e, yaw_e = self._mean_pose_from_indices(elite_idx, weights=w)

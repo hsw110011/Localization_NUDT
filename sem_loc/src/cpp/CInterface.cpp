@@ -1,29 +1,35 @@
 #include "CInterface.h"
 #include <stdio.h>
-CInterface::CInterface(ros::NodeHandle _nh)
+CInterface::CInterface(ros::NodeHandle _nh, bool certain)
 {
     nh = _nh;
 
-//    GlobalPoseSub = nh.subscribe("/self_state/GlobalPose",1,&CInterface::GlobalPoseCallback,this);
-
-    GlobalPoseSub = nh.subscribe("/self_state/GlobalPose",1,&CInterface::GlobalPoseCallback,this);
-    LocalPoseSub = nh.subscribe("/self_state/LocalPose",1,&CInterface::LocalPoseCallback,this);
-    LidarLocalPoseSub = nh.subscribe("/self_state/LidarLocalPose",1,&CInterface::LidarLocalPoseCallback,this);
-    ColorMapSub = nh.subscribe("/world_state/ColorMap",1,&CInterface::ColorMapCallback,this);
-    EntityMapSub = nh.subscribe("/world_state/EntityMap_false",1,&CInterface::EntityMapCallback,this);
-    TerrainMapSub = nh.subscribe("/world_state/TerrainMap",1,&CInterface::TerrainMapCallback,this);
-    SemanticMapSub = nh.subscribe("/world_state/SemanticMap",1,&CInterface::SemanticMapCallback,this);
-    SimilarityMapSub = nh.subscribe("/world_state/SimilarityMap",1,&CInterface::SimilarityMapCallback,this);
-    ReferencePathSub = nh.subscribe("/behavior/ReferencePath",1,&CInterface::ReferencePathCallback, this);
+    // 旧接口当前未参与定位，保留代码但不建立订阅。
+    // GlobalPoseSub = nh.subscribe("/self_state/GlobalPose",1,&CInterface::GlobalPoseCallback,this);
+    // LocalPoseSub = nh.subscribe("/self_state/LocalPose",1,&CInterface::LocalPoseCallback,this);
+    // LidarLocalPoseSub = nh.subscribe("/self_state/LidarLocalPose",1,&CInterface::LidarLocalPoseCallback,this);
+    // ColorMapSub = nh.subscribe("/world_state/ColorMap",1,&CInterface::ColorMapCallback,this);
+    // EntityMapSub = nh.subscribe("/world_state/EntityMap_false",1,&CInterface::EntityMapCallback,this);
+    // TerrainMapSub = nh.subscribe("/world_state/TerrainMap",1,&CInterface::TerrainMapCallback,this);
+    // SemanticMapSub = nh.subscribe("/world_state/SemanticMap",1,&CInterface::SemanticMapCallback,this);
+    // SimilarityMapSub = nh.subscribe("/world_state/SimilarityMap",1,&CInterface::SimilarityMapCallback,this);
+    // ReferencePathSub = nh.subscribe("/behavior/ReferencePath",1,&CInterface::ReferencePathCallback, this);
 
     // New Subscribers
-    OdomSub = nh.subscribe("/Odometry", 1, &CInterface::OdomCallback, this);
-    BevMasksSub = nh.subscribe("/Semantic_Bev/ClassMask", 1, &CInterface::BevMasksCallback, this);
-    BevProbsSub = nh.subscribe("/Semantic_Bev/Probs", 1, &CInterface::BevProbsCallback, this);
+    ros::NodeHandle pnh("~");
+    std::string odom_topic;
+    pnh.param<std::string>("odom_topic", odom_topic, "/lio/odom");
+    OdomSub = nh.subscribe(odom_topic, 1, &CInterface::OdomCallback, this);
+    // 与定位观测模型一致，只订阅当前需要的语义 BEV。
+    if (certain) {
+        BevMasksSub = nh.subscribe("/Semantic_Bev/ClassMask", 1, &CInterface::BevMasksCallback, this);
+    } else {
+        BevProbsSub = nh.subscribe("/Semantic_Bev/Probs", 1, &CInterface::BevProbsCallback, this);
+    }
     // InspvaxSub = nh.subscribe("/novatel_data/inspvax", 1, &CInterface::InspvaxCallback, this);
     InspvaxSub = nh.subscribe("/kitti/oxts/gps/inspvax", 1, &CInterface::InspvaxCallback, this);
-    NavsatOdomSub = nh.subscribe("/navsat/odom", 1, &CInterface::NavsatOdomCallback, this);
-    KittiGpsFixSub = nh.subscribe("/kitti/oxts/gps/fix", 1, &CInterface::KittiGpsFixCallback, this);
+    // NavsatOdomSub = nh.subscribe("/navsat/odom", 1, &CInterface::NavsatOdomCallback, this);
+    // KittiGpsFixSub = nh.subscribe("/kitti/oxts/gps/fix", 1, &CInterface::KittiGpsFixCallback, this);
 
     LocalPose = new self_state::LocalPose;
     LidarLocalPose = new self_state::LidarLocalPose;
@@ -102,7 +108,7 @@ void CInterface::SemanticMapCallback(const world_state::SemanticMap::ConstPtr &m
 void CInterface::ReferencePathCallback(const behavior::ReferencePath::ConstPtr &msg)
 {
     *ReferencePath = *msg;
-    cout << "###  进入回调  ###" << endl;
+    ROS_DEBUG("ReferencePath received.");
     ReferencePath_refreshflag = true;
 }
 
@@ -158,6 +164,7 @@ void CInterface::BevProbsCallback(const sensor_msgs::Image::ConstPtr &msg) {
 
 void CInterface::InspvaxCallback(const novatel_msgs::INSPVAX::ConstPtr &msg) {
     *Inspvax = *msg;
+    last_gnss_reception_ = ros::Time::now();
     Inspvax_refreshflag = true;
 }
 

@@ -4,7 +4,7 @@
 import torch
 import torch.nn.functional as F
 
-from .dsm_patch import _SOBEL_X, _SOBEL_Y, _apply_deadzone_torch
+from .dsm_patch import _SOBEL_X, _SOBEL_Y, _apply_deadzone_torch, _median9
 
 
 def build_sample_grid_batch(cropper, particles):
@@ -13,21 +13,18 @@ def build_sample_grid_batch(cropper, particles):
         raise ValueError("particles must be [N, 3]")
 
     device = cropper.device
-    particles = particles.to(device=device, dtype=torch.float32)
+    particles = particles.to(device=device)
     n = int(particles.shape[0])
 
-    x = particles[:, 0].view(n, 1, 1)
-    y = particles[:, 1].view(n, 1, 1)
-    theta = particles[:, 2].view(n, 1, 1)
+    cc = cropper.cc
+    x = (particles[:, 0].to(torch.float64) - cc.tl_gauss_x).to(torch.float32).view(n, 1, 1)
+    y = (particles[:, 1].to(torch.float64) - cc.tl_gauss_y).to(torch.float32).view(n, 1, 1)
+    theta = particles[:, 2].to(torch.float32).view(n, 1, 1)
     cos_h = torch.cos(theta)
     sin_h = torch.sin(theta)
 
-    gauss_x = x + cropper._x_vehicle * cos_h - cropper._y_vehicle * sin_h
-    gauss_y = y + cropper._x_vehicle * sin_h + cropper._y_vehicle * cos_h
-
-    cc = cropper.cc
-    u = (gauss_x - cc.tl_gauss_x) / cc.res_gauss_x
-    v = -(gauss_y - cc.tl_gauss_y) / cc.res_gauss_y
+    u = (x + cropper._x_vehicle * cos_h - cropper._y_vehicle * sin_h) / cc.res_gauss_x
+    v = -(y + cropper._x_vehicle * sin_h + cropper._y_vehicle * cos_h) / cc.res_gauss_y
 
     dem_w_m1 = max(float(cropper.dem_w - 1), 1.0)
     dem_h_m1 = max(float(cropper.dem_h - 1), 1.0)
@@ -55,8 +52,11 @@ def _median_filter_3x3_batch(layer_batch):
     """layer_batch: [N,H,W] -> [N,H,W]."""
     x = layer_batch.unsqueeze(1)
     padded = F.pad(x, (1, 1, 1, 1), mode="replicate")
+    n, h, w = layer_batch.shape
+    if layer_batch.is_cuda:
+        planes = [padded[:, 0, i:i + h, j:j + w] for i in range(3) for j in range(3)]
+        return _median9(*planes)
     patches = padded.unfold(2, 3, 1).unfold(3, 3, 1)
-    n, _, h, w, _, _ = patches.shape
     return patches.reshape(n, 1, h, w, 9).median(dim=-1).values.squeeze(1)
 
 
@@ -65,7 +65,6 @@ def compute_bev_layers_batch(
     resolution,
     sobel_x,
     sobel_y,
-    h_rel_deadzone_half=0.20,
     grad_deadzone_half=0.15,
     grad_cap=3.0,
 ):
@@ -82,9 +81,7 @@ def compute_bev_layers_batch(
             torch.nanmedian(patch_batch.reshape(n, -1), dim=1).values,
         )
 
-    h_rel = _apply_deadzone_torch(
-        patch_batch - center.view(n, 1, 1), h_rel_deadzone_half
-    )
+    h_rel = patch_batch - center.view(n, 1, 1)
     smoothed = _median_filter_3x3_batch(h_rel)
     s = smoothed.unsqueeze(1)
     grad_index0 = F.conv2d(s, sobel_y, padding=1).squeeze(1)
@@ -107,7 +104,6 @@ def crop_batch_with_bev_layers(cropper, particles, grad_cap=3.0):
         cropper.resolution,
         cropper._sobel_x,
         cropper._sobel_y,
-        h_rel_deadzone_half=cropper.h_rel_deadzone_half,
         grad_deadzone_half=cropper.grad_deadzone_half,
         grad_cap=grad_cap,
     )

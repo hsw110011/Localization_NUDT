@@ -2,7 +2,7 @@
 """以 Odom 位置为中心、车头朝上，用 PyTorch grid_sample 裁剪局部 DSM patch。
 
 BEV 对齐:
-    H_rel_surf = 高程 - 中心点高程，再经 [-h_half, +h_half] 死区
+    H_rel_surf = 高程 - 中心点高程，保留连续高度差
     G_long_L / G_lat_L = 3x3 中值 + Sobel / (8*res)，再经 |g|<=g_half 死区
     显示: H_rel | G_long | G_lat 三列 (各 320×320)，viridis，无 M_L 掩码
     后处理在 GPU 上用 unfold/conv2d，避免 Python 逐像素循环。
@@ -101,11 +101,39 @@ def robust_layer_range(values, fallback_min=0.0, fallback_max=1.0):
     finite = finite[np.isfinite(finite)]
     if finite.size < 2:
         return float(fallback_min), float(fallback_max)
-    low = float(np.percentile(finite, 2.0))
-    high = float(np.percentile(finite, 98.0))
+    low, high = (float(value) for value in np.percentile(finite, [2.0, 98.0]))
     if not np.isfinite(low) or not np.isfinite(high) or (high - low) < 1e-3:
         return float(fallback_min), float(fallback_max)
     return low, high
+
+
+@torch.jit.script
+def _median9(
+    p0: torch.Tensor, p1: torch.Tensor, p2: torch.Tensor,
+    p3: torch.Tensor, p4: torch.Tensor, p5: torch.Tensor,
+    p6: torch.Tensor, p7: torch.Tensor, p8: torch.Tensor,
+):
+    # Fixed compare/exchange network: exact median of nine values, no sort indices.
+    p1, p2 = torch.minimum(p1, p2), torch.maximum(p1, p2)
+    p4, p5 = torch.minimum(p4, p5), torch.maximum(p4, p5)
+    p7, p8 = torch.minimum(p7, p8), torch.maximum(p7, p8)
+    p0, p1 = torch.minimum(p0, p1), torch.maximum(p0, p1)
+    p3, p4 = torch.minimum(p3, p4), torch.maximum(p3, p4)
+    p6, p7 = torch.minimum(p6, p7), torch.maximum(p6, p7)
+    p1, p2 = torch.minimum(p1, p2), torch.maximum(p1, p2)
+    p4, p5 = torch.minimum(p4, p5), torch.maximum(p4, p5)
+    p7, p8 = torch.minimum(p7, p8), torch.maximum(p7, p8)
+    p0, p3 = torch.minimum(p0, p3), torch.maximum(p0, p3)
+    p5, p8 = torch.minimum(p5, p8), torch.maximum(p5, p8)
+    p4, p7 = torch.minimum(p4, p7), torch.maximum(p4, p7)
+    p3, p6 = torch.minimum(p3, p6), torch.maximum(p3, p6)
+    p1, p4 = torch.minimum(p1, p4), torch.maximum(p1, p4)
+    p2, p5 = torch.minimum(p2, p5), torch.maximum(p2, p5)
+    p4, p7 = torch.minimum(p4, p7), torch.maximum(p4, p7)
+    p4, p2 = torch.minimum(p4, p2), torch.maximum(p4, p2)
+    p6, p4 = torch.minimum(p6, p4), torch.maximum(p6, p4)
+    p4, p2 = torch.minimum(p4, p2), torch.maximum(p4, p2)
+    return p4
 
 
 def _median_filter_3x3_torch(layer_2d):
@@ -120,9 +148,7 @@ def _median_filter_3x3_torch(layer_2d):
 def _apply_deadzone_torch(values, half_width):
     if half_width <= 0.0:
         return values
-    out = values.clone()
-    out[out.abs() <= float(half_width)] = 0.0
-    return out
+    return torch.where(values.abs() <= float(half_width), values.new_zeros(()), values)
 
 
 def _compute_bev_layers_torch(
@@ -130,7 +156,6 @@ def _compute_bev_layers_torch(
     resolution,
     sobel_x,
     sobel_y,
-    h_rel_deadzone_half=0.20,
     grad_deadzone_half=0.15,
 ):
     """patch_2d: [H,W] float tensor on any device."""
@@ -138,7 +163,7 @@ def _compute_bev_layers_torch(
     center = patch_2d[rows // 2, cols // 2]
     if not torch.isfinite(center):
         center = torch.nanmedian(patch_2d)
-    h_rel = _apply_deadzone_torch(patch_2d - center, h_rel_deadzone_half)
+    h_rel = patch_2d - center
 
     smoothed = _median_filter_3x3_torch(h_rel)
     s = smoothed.unsqueeze(0).unsqueeze(0)
@@ -157,7 +182,6 @@ def compute_bev_layers(
     elevation_patch,
     resolution=0.2,
     device=None,
-    h_rel_deadzone_half=0.20,
     grad_deadzone_half=0.15,
 ):
     """Numpy wrapper (fast torch backend)."""
@@ -172,7 +196,6 @@ def compute_bev_layers(
         resolution,
         sobel_x,
         sobel_y,
-        h_rel_deadzone_half=h_rel_deadzone_half,
         grad_deadzone_half=grad_deadzone_half,
     )
     return {
@@ -269,7 +292,6 @@ class DsmPatchCropper(object):
         device=None,
         fill_value=0.0,
         edge_min_valid_neighbors=5,
-        h_rel_deadzone_half=0.20,
         grad_deadzone_half=0.15,
     ):
         self.dem_data = dem_data
@@ -279,7 +301,6 @@ class DsmPatchCropper(object):
         self.resolution = float(resolution)
         self.fill_value = float(fill_value)
         self.edge_min_valid_neighbors = int(edge_min_valid_neighbors)
-        self.h_rel_deadzone_half = float(h_rel_deadzone_half)
         self.grad_deadzone_half = float(grad_deadzone_half)
 
         elevation = np.asarray(dem_data.raw_elevation_map, dtype=np.float32)
@@ -362,12 +383,13 @@ class DsmPatchCropper(object):
         cos_h = math.cos(float(heading_rad))
         sin_h = math.sin(float(heading_rad))
 
-        gauss_x = center_gauss_x + self._x_vehicle * cos_h - self._y_vehicle * sin_h
-        gauss_y = center_gauss_y + self._x_vehicle * sin_h + self._y_vehicle * cos_h
-
         cc = self.cc
-        u = (gauss_x - cc.tl_gauss_x) / cc.res_gauss_x
-        v = -(gauss_y - cc.tl_gauss_y) / cc.res_gauss_y
+        # Subtract the large UTM origin before Float32 pixel-grid arithmetic.
+        # At northing ~3e6 m, absolute Float32 coordinates are spaced 0.25 m.
+        local_x = float(center_gauss_x) - cc.tl_gauss_x
+        local_y = float(center_gauss_y) - cc.tl_gauss_y
+        u = (local_x + self._x_vehicle * cos_h - self._y_vehicle * sin_h) / cc.res_gauss_x
+        v = -(local_y + self._x_vehicle * sin_h + self._y_vehicle * cos_h) / cc.res_gauss_y
 
         dem_w_m1 = max(float(self.dem_w - 1), 1.0)
         dem_h_m1 = max(float(self.dem_h - 1), 1.0)
@@ -402,7 +424,6 @@ class DsmPatchCropper(object):
             self.resolution,
             self._sobel_x,
             self._sobel_y,
-            h_rel_deadzone_half=self.h_rel_deadzone_half,
             grad_deadzone_half=self.grad_deadzone_half,
         )
 
@@ -430,7 +451,6 @@ class DsmPatchCropper(object):
             patch,
             resolution=self.resolution,
             device=self.device,
-            h_rel_deadzone_half=self.h_rel_deadzone_half,
             grad_deadzone_half=self.grad_deadzone_half,
         )
         return self.layers_to_vis_bgr(layers)

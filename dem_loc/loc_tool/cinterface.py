@@ -12,7 +12,7 @@
 
 GridMap LiDAR BEV 话题（GridMap_v7_5_ros1 发布）:
     /lidar_bev/grid_map  — grid_map_msgs/GridMap
-    图层: H_rel_surf, M_L, G_long_L, G_lat_L
+    图层: H_stable_surf, M_L, G_long_L, G_lat_L
     parse_lidar_bev_grid_map(msg)  — 解析为 H_L / Gx_L / Gy_L / M_obs numpy 数组
 """
 
@@ -37,7 +37,7 @@ from world_state.msg import TerrainMap as TerrainMapMsg
 from .common_struct import INPUT_DATA_FIELDS, INPUT_REFRESH_FIELDS, InputData
 
 
-BEV_LAYER_H_REL = "H_rel_surf"
+BEV_LAYER_H_REL = "H_stable_surf"
 BEV_LAYER_M_OBS = "M_L"
 BEV_LAYER_G_LONG = "G_long_L"
 BEV_LAYER_G_LAT = "G_lat_L"
@@ -67,7 +67,7 @@ def extract_grid_map_layer(msg, layer_name):
 
 
 def parse_lidar_bev_grid_map(msg):
-    """解析 /lidar_bev/grid_map，返回设计文档命名 H_L, Gx_L, Gy_L, M_obs。"""
+    """解析 /lidar_bev/grid_map，返回匹配输入 H_L, Gx_L, Gy_L, M_obs；H_L 使用稳定化高度。"""
     h_l = extract_grid_map_layer(msg, BEV_LAYER_H_REL)
     m_obs = extract_grid_map_layer(msg, BEV_LAYER_M_OBS)
     gy_l = extract_grid_map_layer(msg, BEV_LAYER_G_LONG)
@@ -85,6 +85,14 @@ def parse_lidar_bev_grid_map(msg):
 
 
 TOPIC_DEFINITIONS = (
+    (
+        "LioOdom",
+        "/lio/odom",
+        Odometry,
+        "LioOdomCallback",
+        "LioOdomSub",
+        "LioOdom_refreshflag",
+    ),
     (
         "GlobalPose",
         "/self_state/GlobalPose",
@@ -272,6 +280,9 @@ class CInterface(object):
 
     def InspvaxCallback(self, msg):
         self._store_message("Inspvax", "Inspvax_refreshflag", msg)
+
+    def LioOdomCallback(self, msg):
+        self._store_message("LioOdom", "LioOdom_refreshflag", msg)
 
     def NavsatOdomCallback(self, msg):
         self._store_message("NavsatOdom", "NavsatOdom_refreshflag", msg)

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.0.2)
 project(loc_bev)
 
+# 未指定类型时启用优化；显式 Debug / RelWithDebInfo 设置仍由调用者决定。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 # ==========================================
 # 0. 编译标准与输出路径
 # ==========================================
@@ -96,7 +101,38 @@ set(LOCALIZATION_COMMON_SOURCES
   src/cpp/Tool.cpp
 )
 
+# ROS 1.17.4 XML-RPC retry fix, scoped to these executables via RPATH.
+# Keep the original SONAME so libroscpp uses the same patched implementation.
+find_package(rostime REQUIRED)
+find_package(cpp_common REQUIRED)
+add_library(sem_loc_xmlrpcpp SHARED
+  third_party/xmlrpcpp/src/XmlRpcClient.cpp
+  third_party/xmlrpcpp/src/XmlRpcDispatch.cpp
+  third_party/xmlrpcpp/src/XmlRpcServer.cpp
+  third_party/xmlrpcpp/src/XmlRpcServerConnection.cpp
+  third_party/xmlrpcpp/src/XmlRpcServerMethod.cpp
+  third_party/xmlrpcpp/src/XmlRpcSocket.cpp
+  third_party/xmlrpcpp/src/XmlRpcSource.cpp
+  third_party/xmlrpcpp/src/XmlRpcUtil.cpp
+  third_party/xmlrpcpp/src/XmlRpcValue.cpp
+  third_party/xmlrpcpp/libb64/src/cdecode.c
+  third_party/xmlrpcpp/libb64/src/cencode.c
+)
+target_include_directories(sem_loc_xmlrpcpp BEFORE PRIVATE
+  third_party/xmlrpcpp/include third_party/xmlrpcpp/libb64/include)
+target_link_libraries(sem_loc_xmlrpcpp ${rostime_LIBRARIES} ${cpp_common_LIBRARIES})
+set_target_properties(sem_loc_xmlrpcpp PROPERTIES
+  OUTPUT_NAME xmlrpcpp
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/sem_loc_ros_lib"
+)
+
+# Source ROS setup normally puts /opt/ros in LD_LIBRARY_PATH. Use DT_RPATH,
+# with this private directory first, so these nodes consistently load the fix.
+set(CMAKE_BUILD_RPATH "${CMAKE_BINARY_DIR}/sem_loc_ros_lib")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--disable-new-dtags")
+
 set(LOCALIZATION_LINK_LIBS
+  sem_loc_xmlrpcpp
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -105,67 +141,48 @@ set(LOCALIZATION_LINK_LIBS
   cnpy
 )
 
-function(add_localization_target target_name main_source particle_filter_source)
-  add_executable(${target_name}
-    ${main_source}
-    ${LOCALIZATION_COMMON_SOURCES}
-    ${particle_filter_source}
-  )
-
-  target_compile_definitions(${target_name}
-    PRIVATE SEM_LOC_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
-  )
-
-  target_link_libraries(${target_name}
-    ${LOCALIZATION_LINK_LIBS}
-  )
-
-  set_target_properties(${target_name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-  message(STATUS "Target [${target_name}] output path: ${CMAKE_BINARY_DIR}")
-endfunction()
-
 # ==========================================
-# 9. 可执行文件
+# 9. 统一运行入口：方法均由 config/sem_loc.yaml 选择
 # ==========================================
-
-# --- Executable 1: bev ---
 add_executable(bev src/semantic_bev.cpp)
-
+target_compile_definitions(bev PRIVATE SEM_LOC_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 target_link_libraries(bev
+  sem_loc_xmlrpcpp
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
   ${PCL_LIBRARIES}
 )
 
+add_executable(sem_localization
+  src/sem_localization.cpp
+  src/cpp/ParticleFilter.cpp
+  ${LOCALIZATION_COMMON_SOURCES}
+)
+target_compile_definitions(sem_localization PRIVATE SEM_LOC_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+target_link_libraries(sem_localization ${LOCALIZATION_LINK_LIBS})
 
-add_executable(bev_uncertain src/semantic_bev_uncertain.cpp)
-
-target_link_libraries(bev_uncertain
-  ${catkin_LIBRARIES}
-  ${OpenCV_LIBRARIES}
-  ${PCL_LIBRARIES}
+# 两个统一运行入口：./build/bev 和 ./build/sem_localization。
+set_target_properties(bev sem_localization PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
-set_target_properties(bev PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-message(STATUS "Target [bev] output path: ${CMAKE_BINARY_DIR}")
-set_target_properties(bev_uncertain PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
-message(STATUS "Target [bev_uncertain] output path: ${CMAKE_BINARY_DIR}")
+# Motion regressions are opt-in build targets, so normal node builds stay unchanged.
+if(CATKIN_ENABLE_TESTING)
+  add_executable(test_xmlrpc_retry EXCLUDE_FROM_ALL tests/test_xmlrpc_retry.cpp)
+  target_link_libraries(test_xmlrpc_retry sem_loc_xmlrpcpp)
+  add_test(NAME xmlrpc_retry COMMAND test_xmlrpc_retry)
+  add_executable(test_motion2d EXCLUDE_FROM_ALL tests/test_motion2d.cpp)
+  target_link_libraries(test_motion2d gtsam)
+  add_test(NAME motion2d COMMAND test_motion2d)
+  add_executable(test_particle_motion EXCLUDE_FROM_ALL
+    tests/test_particle_motion.cpp src/cpp/ParticleFilter.cpp src/cpp/CoordConverter.cpp)
+  target_link_libraries(test_particle_motion ${LOCALIZATION_LINK_LIBS})
+  add_test(NAME particle_motion COMMAND test_particle_motion)
 
-
-add_localization_target(localization_baseline
-  src/localization_baseline.cpp
-  src/cpp/ParticleFilter_baseline.cpp
-)
-
-add_localization_target(localization_ourmethod
-  src/localization_ourmethod.cpp
-  src/cpp/ParticleFilter_our.cpp
-)
-
-add_localization_target(localization_forloop
-  src/localization_forloop.cpp
-  src/cpp/ParticleFilter_forloop.cpp
-)
-
-
-# [注意]: cnpy 如果没有 find_package，系统库里必须有，或者你需要手动 link 它的绝对路径
+  add_executable(test_scoring_routes EXCLUDE_FROM_ALL tests/test_scoring_routes.cpp
+    src/cpp/ParticleFilter.cpp src/cpp/CoordConverter.cpp)
+  target_link_libraries(test_scoring_routes ${LOCALIZATION_LINK_LIBS})
+  add_test(NAME scoring_routes COMMAND test_scoring_routes)
+  add_test(NAME bev_config COMMAND ${PYTHON_EXECUTABLE}
+    ${PROJECT_SOURCE_DIR}/tests/bev_config_test.py $<TARGET_FILE:bev>)
+endif()

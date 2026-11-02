@@ -1,0 +1,18 @@
+<launch>
+  <arg name="config" default="$(find lio_bev)/config/lio_bev.yaml" />
+  <arg name="node_name" default="lio_bev" />
+  <arg name="output" default="screen" />
+  <arg name="diagnostics" default="false" />
+  <arg name="height_viewer" default="false" />
+
+  <rosparam command="load" file="$(arg config)" ns="$(arg node_name)" />
+
+  <node
+    pkg="lio_bev"
+    type="lio_bev"
+    name="$(arg node_name)"
+    output="$(arg output)"
+    required="true" />
+  <include if="$(arg diagnostics)" file="$(find lio_bev)/launch/surface_diagnostics.launch" />
+  <include if="$(arg height_viewer)" file="$(find lio_bev)/launch/height_viewer.launch" />
+</launch>

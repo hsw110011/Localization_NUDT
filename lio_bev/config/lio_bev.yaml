@@ -1,0 +1,61 @@
+# ROS topics and frames.
+input_topic: "/lio/cloud_world"
+odometry_topic: "/lio/odom"
+output_topic: "/lidar_bev/grid_map"
+use_odometry_frame: true
+input_cloud_in_world: true
+odometry_frame_id: "camera_init"
+body_frame_id: "body"
+# Keep full SE(3) for capture/accumulation; level only the published BEV reference.
+gravity_aligned_output: true
+bev_frame_id: "bev_local"
+publish_bev_tf: true
+# Process every available input frame; positive values cap the worker using wall time.
+update_rate_hz: 0.0
+odometry_wait_sec: 0.05
+odometry_max_gap_sec: 0.20
+odometry_nearest_tolerance_sec: 0.03
+performance_log_interval_sec: 5.0
+
+# BEV geometry.
+resolution: 0.2
+map_size_x: 64.0
+map_size_y: 64.0
+point_min_z: -100.0
+point_max_z: 200.0
+
+# Ego vehicle filtering in body frame.
+ego_filter_enabled: true
+ego_box_min_x: -4.0
+ego_box_max_x: 2.0
+ego_box_min_y: -2.0
+ego_box_max_y: 2.0
+
+# Height and gradient layers.
+h_rel_deadzone_half_width: 0.0  # A/B check: keep center subtraction, preserve small height changes.
+grad_deadzone_half_width: 0.15
+grad_cap: 0.0
+edge_min_valid_neighbors: 5
+
+# Per-frame SLAM height/tilt correction.
+stabilization_min_overlap_cells: 80
+stabilization_inlier_threshold: 0.15
+stabilization_max_z: 0.30
+stabilization_max_tilt_deg: 1.5
+stabilization_alpha: 0.25
+# C456-style corrected-height accumulation.
+corrected_sample_capacity: 32
+corrected_surface_top_fraction: 0.05
+accumulation_update_distance_m: 0.5
+accumulation_update_yaw_deg: 2.0
+accumulation_max_interval_sec: 0.5
+
+# World-aligned rolling accumulation. The internal backing grid covers the
+# rotated corners; the published BEV remains 64 m x 64 m and vehicle-centered.
+stabilization_history_frames: 10
+
+# Optional smoothing filters.
+enable_spatial_height_smoothing: false
+height_smoothing_radius: 2
+height_smoothing_max_delta: 0.35
+height_smoothing_min_neighbors: 3

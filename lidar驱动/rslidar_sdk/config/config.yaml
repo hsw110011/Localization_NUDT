@@ -40,7 +40,7 @@ lidar:
     ros:
       ros_recv_packet_topic: /sensor/RS128Packets        #Topic used to receive lidar packets from ROS
       ros_send_packet_topic: /sensor/RS128Packets          #Topic used to send lidar packets through ROS
-      ros_send_point_cloud_topic: /sensor/RS128Points      #Topic used to send point cloud through ROS
+      ros_send_point_cloud_topic: /sensor/RS128Points_tztek    #Topic used to send point cloud through ROS
 
        
    

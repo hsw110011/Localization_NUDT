@@ -37,7 +37,7 @@ CoordConverter::CoordConverter(const SatelliteData& map_data)
 
     res_lon_ = (br_lon_ - tl_lon_) / map_width_;
     res_lat_ = (tl_lat_ - br_lat_) / map_height_;
-    cout << "res_lon_: " << res_lon_ << ", res_lat_: " << res_lat_ << endl;
+    ROS_DEBUG_STREAM("res_lon_: " << res_lon_ << ", res_lat_: " << res_lat_);
     GaussPoint gauss_tl = wgs84_to_gauss(tl_lon_, tl_lat_);
 
     if (std::abs(map_data.origin_x - gauss_tl.x) > UTM_ORIGIN_TOLERANCE_M ||

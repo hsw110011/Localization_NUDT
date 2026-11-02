@@ -8,12 +8,10 @@ try:
 except ImportError:
     cv2 = None
 
-from .dsm_bev_score import apply_bev_mask_to_layers, cap_gradient_layer
 from .dsm_patch import (
     draw_center_dot,
     render_colorized_layer,
     render_mask_layer,
-    render_masked_colorized_layer,
     robust_layer_range,
 )
 
@@ -163,55 +161,6 @@ def _build_data_row(
     return row
 
 
-def _build_masked_row(
-    row_title,
-    lidar_layers,
-    dsm_layers,
-    layer_ranges,
-    m_obs,
-    score_config,
-    return_meta=False,
-):
-    _, masked = apply_bev_mask_to_layers(
-        lidar_layers["H_L"],
-        lidar_layers["Gx_L"],
-        lidar_layers["Gy_L"],
-        dsm_layers["H_rel_surf"],
-        dsm_layers["G_lat_L"],
-        dsm_layers["G_long_L"],
-        lidar_layers["M_obs"],
-    )
-    dsm_masked = {
-        "H_rel_surf": masked["H_D"],
-        "G_long_L": cap_gradient_layer(masked["Gy_D"], score_config.grad_cap),
-        "G_lat_L": cap_gradient_layer(masked["Gx_D"], score_config.grad_cap),
-    }
-    panels = []
-    for layer_label, dsm_key, lidar_key in _LAYER_SPECS:
-        arr = np.asarray(dsm_masked[dsm_key], dtype=np.float32)
-        vmin, vmax = layer_ranges[layer_label]
-        title = "{} {}".format(row_title.split()[0], layer_label)
-        panels.append(
-            _make_panel(
-                draw_center_dot(render_masked_colorized_layer(arr, m_obs, vmin, vmax)),
-                title,
-                arr,
-            )
-        )
-    mask_title = "{} M_L".format(row_title.split()[0])
-    panels.append(
-        _make_panel(
-            draw_center_dot(render_mask_layer(m_obs)),
-            mask_title,
-            m_obs,
-        )
-    )
-    row, meta = _hconcat_panel_records(panels)
-    if return_meta:
-        return row, meta
-    return row
-
-
 def build_quad_patch_view(
     lidar_layers,
     global_layers,
@@ -219,18 +168,12 @@ def build_quad_patch_view(
     pf_best_layers,
     pf_best_score,
     pf_best_pose=None,
-    score_config=None,
     pf_label="PF best",
     return_meta=False,
 ):
-    """4 行: LiDAR | Global | PF 位姿 | PF 位姿经 M_obs mask。"""
+    """3 行 × 4 列: LiDAR BEV / GPS DSM / PF 输出 DSM。"""
     if cv2 is None:
         raise ImportError("dsm_bev_score_vis requires OpenCV (cv2)")
-
-    from .dsm_bev_score import DsmBevScoreConfig
-
-    if score_config is None:
-        score_config = DsmBevScoreConfig()
 
     m_obs = np.asarray(lidar_layers["M_obs"], dtype=np.float32)
     layer_ranges = _layer_ranges_from_sources(
@@ -257,7 +200,7 @@ def build_quad_patch_view(
             "LiDAR BEV", lidar_layers, True, layer_ranges, m_obs, return_meta=return_meta
         ),
         _build_data_row(
-            "Global score={:.4f}".format(g_score),
+            "GPS score={:.4f}".format(g_score),
             global_layers,
             False,
             layer_ranges,
@@ -266,15 +209,6 @@ def build_quad_patch_view(
         ),
         _build_data_row(
             pf_tag, pf_best_layers, False, layer_ranges, m_obs, return_meta=return_meta
-        ),
-        _build_masked_row(
-            "{} masked score={:.4f}".format(str(pf_label), pf_score),
-            lidar_layers,
-            pf_best_layers,
-            layer_ranges,
-            m_obs,
-            score_config,
-            return_meta=return_meta,
         ),
     ]
     if return_meta:

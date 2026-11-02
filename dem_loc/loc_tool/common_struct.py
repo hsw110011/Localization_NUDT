@@ -254,6 +254,7 @@ INPUT_DATA_FIELDS = (
     "Odom",
     "Inspvax",
     "NavsatOdom",
+    "LioOdom",
     "KittiGpsFix",
 )
 
@@ -272,6 +273,7 @@ INPUT_REFRESH_FIELDS = (
     "Odom_refreshflag",
     "Inspvax_refreshflag",
     "NavsatOdom_refreshflag",
+    "LioOdom_refreshflag",
     "KittiGpsFix_refreshflag",
 )
 

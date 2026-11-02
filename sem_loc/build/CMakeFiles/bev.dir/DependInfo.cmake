@@ -16,6 +16,7 @@ set(CMAKE_TARGET_DEFINITIONS_CXX
   "ROSCONSOLE_BACKEND_LOG4CXX"
   "ROS_BUILD_SHARED_LIBS=1"
   "ROS_PACKAGE_NAME=\"loc_bev\""
+  "SEM_LOC_SOURCE_DIR=\"/home/hsw/catkin_ws/program/sem_loc\""
   "qh_QHpointer"
   "vtkRenderingContext2D_AUTOINIT=1(vtkRenderingContextOpenGL2)"
   "vtkRenderingCore_AUTOINIT=3(vtkInteractionStyle,vtkRenderingFreeType,vtkRenderingOpenGL2)"
@@ -28,19 +29,21 @@ set(CMAKE_CXX_TARGET_INCLUDE_PATH
   "/home/hsw/catkin_ws/devel/include"
   "/opt/ros/noetic/include"
   "/opt/ros/noetic/share/xmlrpcpp/cmake/../../../include/xmlrpcpp"
+  "/usr/include/opencv4"
   "/home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/include"
   "/home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/include/torch/csrc/api/include"
   "/usr/include/vtk-7.1"
   "/usr/include/freetype2"
-  "/usr/include/opencv4"
   "/usr/include/eigen3"
   "/usr/include/pcl-1.10"
+  "/usr/local/include/opencv4"
   "/usr/include/ni"
   "/usr/include/openni2"
   )
 
 # Targets to which this target links.
 set(CMAKE_TARGET_LINKED_INFO_FILES
+  "/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles/sem_loc_xmlrpcpp.dir/DependInfo.cmake"
   )
 
 # Fortran module output directory.

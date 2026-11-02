@@ -33,17 +33,19 @@
  */
 class CudaScopedTimer {
 public:
-    explicit CudaScopedTimer(const std::string& label, bool print_on_destroy = true)
-        : label_(label), print_(print_on_destroy)
+    explicit CudaScopedTimer(const std::string& label, bool print_on_destroy = true,
+                             bool synchronize_cuda = true)
+        : label_(label), print_(print_on_destroy),
+          synchronize_cuda_(synchronize_cuda && torch::cuda::is_available())
     {
-        if (torch::cuda::is_available()) {
+        if (synchronize_cuda_) {
             torch::cuda::synchronize();
         }
         start_ = std::chrono::high_resolution_clock::now();
     }
 
     ~CudaScopedTimer() {
-        if (torch::cuda::is_available()) {
+        if (synchronize_cuda_) {
             torch::cuda::synchronize();
         }
         auto end = std::chrono::high_resolution_clock::now();
@@ -111,6 +113,7 @@ public:
 private:
     std::string label_;
     bool print_;
+    bool synchronize_cuda_;
     std::chrono::high_resolution_clock::time_point start_;
 
     static std::unordered_map<std::string, Stats>& GetStatsMap() {

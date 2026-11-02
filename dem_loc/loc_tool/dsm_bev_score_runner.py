@@ -101,11 +101,10 @@ def _dsm_result_from_batch(dsm_cropper, dsm_batch, index):
         "layers": layers,
         "elevation": layers["H_rel_surf"] + layers["center_height"],
     }
-    result["vis_bgr"] = dsm_cropper.layers_to_vis_bgr(layers)
     return result
 
 
-def _score_pose_batch(
+def score_pose_batch(
     dsm_cropper,
     pose_rows,
     lidar_layers,
@@ -114,7 +113,7 @@ def _score_pose_batch(
     return_dsm_results=True,
 ):
     device = dsm_cropper.device
-    particles = torch.as_tensor(pose_rows, dtype=torch.float32, device=device)
+    particles = torch.as_tensor(pose_rows, dtype=torch.float64, device=device)
     if particles.ndim != 2 or particles.shape[1] != 3:
         raise ValueError("pose_rows must be [N, 3]")
 
@@ -165,7 +164,7 @@ def score_at_pose(
     if config is None:
         config = DsmBevScoreConfig()
 
-    scores, dsm_results = _score_pose_batch(
+    scores, dsm_results = score_pose_batch(
         dsm_cropper,
         [[float(gauss_x), float(gauss_y), float(theta)]],
         lidar_layers,
@@ -219,7 +218,7 @@ def score_global_and_local(
         local_heading_unit=local_heading_unit,
         local_heading_convention=local_heading_convention,
     )
-    scores, dsm_results = _score_pose_batch(
+    scores, dsm_results = score_pose_batch(
         dsm_cropper,
         [
             [g_gauss_x, g_gauss_y, g_theta],
@@ -295,7 +294,7 @@ def score_perturbation_grid(
                         "theta": ptheta,
                     }
                 )
-    scores, dsm_results = _score_pose_batch(
+    scores, dsm_results = score_pose_batch(
         dsm_cropper,
         pose_rows,
         lidar_layers,

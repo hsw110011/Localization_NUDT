@@ -70,9 +70,22 @@ CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.s: cmake_fo
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/hsw/catkin_ws/program/sem_loc/src/localization_ourmethod.cpp -o CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.s
 
+CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o: CMakeFiles/localization_ourmethod.dir/flags.make
+CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o: ../src/cpp/ParticleFilter_our.cpp
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o"
+	/usr/bin/c++  $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -o CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o -c /home/hsw/catkin_ws/program/sem_loc/src/cpp/ParticleFilter_our.cpp
+
+CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/hsw/catkin_ws/program/sem_loc/src/cpp/ParticleFilter_our.cpp > CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.i
+
+CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/hsw/catkin_ws/program/sem_loc/src/cpp/ParticleFilter_our.cpp -o CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.s
+
 CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.o: CMakeFiles/localization_ourmethod.dir/flags.make
 CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.o: ../src/cpp/CInterface.cpp
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.o"
 	/usr/bin/c++  $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -o CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.o -c /home/hsw/catkin_ws/program/sem_loc/src/cpp/CInterface.cpp
 
 CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.i: cmake_force
@@ -85,7 +98,7 @@ CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.s: cmake_force
 
 CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.o: CMakeFiles/localization_ourmethod.dir/flags.make
 CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.o: ../src/cpp/CommonStruct.cpp
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.o"
 	/usr/bin/c++  $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -o CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.o -c /home/hsw/catkin_ws/program/sem_loc/src/cpp/CommonStruct.cpp
 
 CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.i: cmake_force
@@ -98,7 +111,7 @@ CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.s: cmake_force
 
 CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.o: CMakeFiles/localization_ourmethod.dir/flags.make
 CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.o: ../src/cpp/CoordConverter.cpp
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.o"
 	/usr/bin/c++  $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -o CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.o -c /home/hsw/catkin_ws/program/sem_loc/src/cpp/CoordConverter.cpp
 
 CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.i: cmake_force
@@ -111,7 +124,7 @@ CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.s: cmake_force
 
 CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o: CMakeFiles/localization_ourmethod.dir/flags.make
 CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o: ../src/cpp/Tool.cpp
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o"
 	/usr/bin/c++  $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -o CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o -c /home/hsw/catkin_ws/program/sem_loc/src/cpp/Tool.cpp
 
 CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.i: cmake_force
@@ -122,38 +135,26 @@ CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/hsw/catkin_ws/program/sem_loc/src/cpp/Tool.cpp -o CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.s
 
-CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o: CMakeFiles/localization_ourmethod.dir/flags.make
-CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o: ../src/cpp/ParticleFilter_our.cpp
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green --progress-dir=/home/hsw/catkin_ws/program/sem_loc/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o"
-	/usr/bin/c++  $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -o CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o -c /home/hsw/catkin_ws/program/sem_loc/src/cpp/ParticleFilter_our.cpp
-
-CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Preprocessing CXX source to CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/hsw/catkin_ws/program/sem_loc/src/cpp/ParticleFilter_our.cpp > CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.i
-
-CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --green "Compiling CXX source to assembly CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/hsw/catkin_ws/program/sem_loc/src/cpp/ParticleFilter_our.cpp -o CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.s
-
 # Object files for target localization_ourmethod
 localization_ourmethod_OBJECTS = \
 "CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o" \
+"CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o" \
 "CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.o" \
 "CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.o" \
 "CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.o" \
-"CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o" \
-"CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o"
+"CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o"
 
 # External object files for target localization_ourmethod
 localization_ourmethod_EXTERNAL_OBJECTS =
 
 localization_ourmethod: CMakeFiles/localization_ourmethod.dir/src/localization_ourmethod.cpp.o
+localization_ourmethod: CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o
 localization_ourmethod: CMakeFiles/localization_ourmethod.dir/src/cpp/CInterface.cpp.o
 localization_ourmethod: CMakeFiles/localization_ourmethod.dir/src/cpp/CommonStruct.cpp.o
 localization_ourmethod: CMakeFiles/localization_ourmethod.dir/src/cpp/CoordConverter.cpp.o
 localization_ourmethod: CMakeFiles/localization_ourmethod.dir/src/cpp/Tool.cpp.o
-localization_ourmethod: CMakeFiles/localization_ourmethod.dir/src/cpp/ParticleFilter_our.cpp.o
 localization_ourmethod: CMakeFiles/localization_ourmethod.dir/build.make
+localization_ourmethod: sem_loc_ros_lib/libxmlrpcpp.so
 localization_ourmethod: /opt/ros/noetic/lib/libpcl_ros_filter.so
 localization_ourmethod: /opt/ros/noetic/lib/libpcl_ros_tf.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libboost_thread.so
@@ -322,35 +323,15 @@ localization_ourmethod: /opt/ros/noetic/lib/libcpp_common.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libboost_system.so.1.71.0
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libboost_thread.so.1.71.0
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libconsole_bridge.so.0.4
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_stitching.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_aruco.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_bgsegm.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_bioinspired.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_ccalib.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_dnn_objdetect.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_dnn_superres.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_dpm.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_face.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_freetype.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_fuzzy.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_hdf.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_hfs.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_img_hash.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_line_descriptor.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_quality.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_reg.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_rgbd.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_saliency.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_shape.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_stereo.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_structured_light.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_superres.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_surface_matching.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_tracking.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_videostab.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_viz.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_xobjdetect.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_xphoto.so.4.2.0
+localization_ourmethod: /usr/local/lib/libopencv_dnn.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_gapi.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_highgui.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_ml.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_objdetect.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_photo.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_stitching.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_video.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_videoio.so.4.3.0
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libpcl_apps.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libpcl_outofcore.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libpcl_people.so
@@ -377,6 +358,7 @@ localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkRenderingLOD-7.1.so.7.1p
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkViewsContext2D-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkViewsCore-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkRenderingContextOpenGL2-7.1.so.7.1p.1
+localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkRenderingOpenGL2-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libflann_cpp.so
 localization_ourmethod: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/lib/libtorch.so
 localization_ourmethod: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/lib/libc10.so
@@ -526,37 +508,24 @@ localization_ourmethod: /usr/lib/x86_64-linux-gnu/liblog4cxx.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libboost_regex.so.1.71.0
 localization_ourmethod: /opt/ros/noetic/lib/libxmlrpcpp.so
 localization_ourmethod: /opt/ros/noetic/lib/libroscpp_serialization.so
+localization_ourmethod: /usr/lib/libOpenNI.so
+localization_ourmethod: /usr/lib/libOpenNI2.so
 localization_ourmethod: /opt/ros/noetic/lib/librostime.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libboost_date_time.so.1.71.0
 localization_ourmethod: /opt/ros/noetic/lib/libcpp_common.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libboost_system.so.1.71.0
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libboost_thread.so.1.71.0
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libconsole_bridge.so.0.4
-localization_ourmethod: /usr/lib/libOpenNI.so
-localization_ourmethod: /usr/lib/libOpenNI2.so
 localization_ourmethod: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/lib/libc10.so
 localization_ourmethod: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/lib/libkineto.a
 localization_ourmethod: /usr/local/cuda-12.6/lib64/libnvrtc.so
 localization_ourmethod: /home/hsw/Library/libtorch-shared-with-deps-2.9.0+cu126/libtorch/lib/libc10_cuda.so
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_highgui.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_datasets.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_plot.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_text.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_dnn.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_ml.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_phase_unwrapping.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_optflow.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_ximgproc.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_video.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_videoio.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_imgcodecs.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_objdetect.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_calib3d.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_features2d.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_flann.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_photo.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_imgproc.so.4.2.0
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libopencv_core.so.4.2.0
+localization_ourmethod: /usr/local/lib/libopencv_imgcodecs.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_calib3d.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_features2d.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_flann.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_imgproc.so.4.3.0
+localization_ourmethod: /usr/local/lib/libopencv_core.so.4.3.0
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libpcl_surface.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libpcl_keypoints.so
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libpcl_tracking.so
@@ -594,7 +563,6 @@ localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkIOCore-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkRenderingContext2D-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkRenderingFreeType-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libfreetype.so
-localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkRenderingOpenGL2-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkImagingCore-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkRenderingCore-7.1.so.7.1p.1
 localization_ourmethod: /usr/lib/x86_64-linux-gnu/libvtkCommonColor-7.1.so.7.1p.1

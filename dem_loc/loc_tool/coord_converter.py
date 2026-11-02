@@ -133,6 +133,18 @@ class CoordConverter(object):
             self.res_gauss_x = (gauss_br.x - gauss_tl.x) / max(float(self.map_width - 1), 1.0)
             self.res_gauss_y = (gauss_tl.y - gauss_br.y) / max(float(self.map_height - 1), 1.0)
 
+        if dem_tiff_data.utm_geotransform:
+            gt = dem_tiff_data.utm_geotransform
+            # GeoTIFF origin is the outer corner; array samples are pixel centers.
+            self.tl_gauss_x = gt[0] + 0.5 * gt[1]
+            self.tl_gauss_y = gt[3] + 0.5 * gt[5]
+            self.res_gauss_x = gt[1]
+            self.res_gauss_y = -gt[5]
+            self.utm_min_x = gt[0]
+            self.utm_max_x = gt[0] + self.map_width * gt[1]
+            self.utm_min_y = gt[3] + self.map_height * gt[5]
+            self.utm_max_y = gt[3]
+
     def is_wgs84_in_bounds(self, lon, lat, margin_deg=0.0):
         margin = float(margin_deg)
         lon_v = float(lon)

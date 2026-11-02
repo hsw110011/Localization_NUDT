@@ -1,384 +1,377 @@
-/**
- * Visual BEV Mapper (Final Fix)
- * 1. 修复 'no member named data' 编译错误
- * 2. 适配 0, 1, 2 三个类别
- */
-
 #include <ros/ros.h>
+#include <xmlrpcpp/XmlRpcUtil.h>
+#include <cerrno>
+#include <cstdio>
+#include "SemLocConfig.h"
 #include <sensor_msgs/PointCloud2.h>
 #include <sensor_msgs/Image.h>
 #include <nav_msgs/Odometry.h>
 #include <cv_bridge/cv_bridge.h>
-#include <image_transport/image_transport.h>
-
-// TF & Math
-#include <tf2_ros/transform_listener.h>
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
-#include <tf2_eigen/tf2_eigen.h>
-#include <Eigen/Dense>
-
-// PCL
 #include <pcl_conversions/pcl_conversions.h>
-#include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/common/transforms.h>
-#include <pcl/impl/point_types.hpp>
-
-// OpenCV
 #include <opencv2/opencv.hpp>
-#include <opencv2/highgui/highgui.hpp>
-
-#include <mutex>
-#include <unordered_map>
-#include <vector>
-#include <string>
+#include <Eigen/Geometry>
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
+#include <deque>
+#include <iostream>
+#include <limits>
+#include <unordered_map>
 
-// ==========================================
-// 1. 自定义 PCL 点类型
-// ==========================================
-struct PointXYZIRGBLabelCurvature
-{
-    // --------------------------------------------------------
-    // [Offset 0-15] 坐标 + 强度
-    // --------------------------------------------------------
-    union
-    {
-        // PCL 变换函数强制要求这个数组存在 (float data[4])
-        float data[4];
-
-        // 这里的 x, y, z, intensity 与 data 共享内存
-        // data[0]=x, data[1]=y, data[2]=z, data[3]=intensity
-        struct
-        {
-            float x;
-            float y;
-            float z;
-            float intensity; // Offset 12
-        };
-    };
-
-    // --------------------------------------------------------
-    // [Offset 16-19] 颜色
-    // --------------------------------------------------------
-    union
-    {
-        union
-        {
-            struct
-            {
-                uint8_t b;
-                uint8_t g;
-                uint8_t r;
-                uint8_t a;
-            };
-            float rgb;
-        };
-        uint32_t rgba;
-    };
-
-    // --------------------------------------------------------
-    // [Offset 20-23] 标签 (uint32)
-    // --------------------------------------------------------
-    uint32_t label;
-
-    // --------------------------------------------------------
-    // [Offset 24-27] 曲率
-    // --------------------------------------------------------
-    float curvature;
-
-    // --------------------------------------------------------
-    // [Offset 28-31] 填充 (凑齐 32 字节)
-    // --------------------------------------------------------
-    uint32_t _padding;
-
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-} EIGEN_ALIGN16;
-
-// 注册点类型
-POINT_CLOUD_REGISTER_POINT_STRUCT(PointXYZIRGBLabelCurvature,
-    (float, x, x)
-    (float, y, y)
-    (float, z, z)
-    (float, intensity, intensity)
-    (float, rgb, rgb)
-    (uint32_t, label, label)
-    (float, curvature, curvature)
-)
-
-// ==========================================
-// 2. 辅助数据结构
-// ==========================================
+using SemanticPoint = pcl::PointXYZL;
 struct GridKey {
-    int u;
-    int v;
-    bool operator==(const GridKey& other) const { return (u == other.u && v == other.v); }
+    int x, y;
+    bool operator==(const GridKey& other) const { return x == other.x && y == other.y; }
 };
-
 struct GridKeyHash {
-    std::size_t operator()(const GridKey& k) const {
-        return ((int64_t)k.u << 32) | ((uint32_t)k.v);
+    std::size_t operator()(const GridKey& key) const {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(key.x)) << 32) |
+               static_cast<uint32_t>(key.y);
     }
 };
 
+// 一帧对一个格子仅贡献一次，避免点密度和遍历顺序改变时序融合权重。
+struct CellObservation {
+    std::array<float, 4> votes{}; // road, building, plant, others
+    std::array<float, 3> probs{};
+};
 struct GridCell {
-    float z;
-    uint32_t label;
-    uint8_t r, g, b;
-    // float intensity;
+    std::deque<CellObservation> history;
+    std::array<float, 3> probs{};
+    int label = 3;
+    float entropy = 0;
+
+    void refresh() {
+        std::array<float, 4> votes{};
+        probs.fill(0);
+        for (const auto& observation : history) {
+            for (int c = 0; c < 4; ++c) votes[c] += observation.votes[c];
+            for (int c = 0; c < 3; ++c) probs[c] += observation.probs[c];
+        }
+        for (float& p : probs) p /= history.size();
+        label = std::max_element(votes.begin(), votes.end()) - votes.begin();
+        const float sum=probs[0]+probs[1]+probs[2];
+        entropy=0;
+        for (float value : probs) {
+            const float p=sum>0 ? value/sum : 0;
+            if (p>0.f) entropy-=p*std::log(p);
+        }
+        entropy=std::clamp(entropy/std::log(3.f),0.f,1.f);
+    }
+};
+struct PoseSample {
+    ros::Time stamp;
+    Eigen::Isometry3d pose = Eigen::Isometry3d::Identity();
+    std::string frame;
 };
 
-// ==========================================
-// 3. Mapper 类
-// ==========================================
 class VisualBevMapper {
 public:
-    VisualBevMapper() : nh_("~") {
-        // --- 参数 ---
-        nh_.param("resolution", resolution_, 0.15);
-        nh_.param("view_range", view_range_, 60.0);
-        img_size_ = static_cast<int>(view_range_ / resolution_);
-
-        // --- 类别设置 (修正：只保留 0, 1, 2) ---
-        class_names_ = {"road", "building", "plant"};
-        num_classes_ = 3;
-
-        // --- 状态初始化 ---
-        has_odom_ = false;
-        cur_pose_mat_ = Eigen::Isometry3d::Identity();
-
-        // --- ROS 接口 ---
-        sub_odom_ = nh_.subscribe("/Odometry", 10, &VisualBevMapper::odomCb, this);
-        sub_cloud_ = nh_.subscribe("/cloud_registered_body", 5, &VisualBevMapper::cloudCb, this);
-
-        pub_rgb_ = nh_.advertise<sensor_msgs::Image>("/Semantic_Bev/Rgb", 1);
-
-        // 发布一个包含所有 mask 的话题 (多通道)
-        // 通道 0: Mask 0 (Road)
-        // 通道 1: Mask 1 (Building)
-        // 通道 2: Mask 2 (Plant)
-        pub_all_masks_ = nh_.advertise<sensor_msgs::Image>("/Semantic_Bev/ClassMask", 1);
-
-        timer_ = nh_.createTimer(ros::Duration(0.1), &VisualBevMapper::timerRenderCb, this);
-
-        ROS_INFO("Visual BEV Mapper Started (Classes: 0, 1, 2).");
+    explicit VisualBevMapper(const sem_loc::Config& config) : nh_("~"), config_(config) {
+        nh_.param("resolution", resolution_, config.resolution);
+        nh_.param("view_range", view_range_, config.view_range);
+        if (!std::isfinite(resolution_) || resolution_ <= 0 ||
+            !std::isfinite(view_range_) || view_range_ < 2 * resolution_)
+            throw std::invalid_argument("invalid BEV geometry");
+        size_ = static_cast<int>(view_range_ / resolution_);
+        radius_ = static_cast<int>(std::ceil(view_range_ / std::sqrt(2.0) / resolution_)) + 1;
+        sub_odom_ = nh_.subscribe("/lio/odom", 100, &VisualBevMapper::odomCb, this);
+        sub_cloud_ = nh_.subscribe("/lio/cloud_world", 5, &VisualBevMapper::cloudCb, this);
+        if (config_.bev_mode == sem_loc::BevMode::Certain) {
+            pub_semantic_ = nh_.advertise<sensor_msgs::Image>("/Semantic_Bev/ClassMask", 1);
+        } else {
+            pub_semantic_ = nh_.advertise<sensor_msgs::Image>("/Semantic_Bev/Probs", 1);
+        }
+        timer_ = nh_.createWallTimer(ros::WallDuration(0.01), &VisualBevMapper::timerCb, this);
+        std::cout << "[BEV] Started: " << (certain() ? "certain [road,building,plant,mask]"
+            : "uncertain [road,building,plant,entropy,mask]")
+            << ", output=" << pub_semantic_.getTopic()
+            << ", encoding=" << (certain() ? "8UC4" : "32FC5")
+            << ", odom=" << sub_odom_.getTopic() << ", cloud=" << sub_cloud_.getTopic() << std::endl;
     }
 
 private:
     ros::NodeHandle nh_;
-    ros::Subscriber sub_odom_;
-    ros::Subscriber sub_cloud_;
-    ros::Publisher pub_rgb_;
-    ros::Publisher pub_all_masks_; // 单一话题发布所有 mask
-    ros::Timer timer_;
+    sem_loc::Config config_;
+    ros::Subscriber sub_odom_, sub_cloud_;
+    ros::Publisher pub_semantic_;
+    ros::WallTimer timer_;
+    double resolution_, view_range_;
+    int size_, radius_;
+    std::deque<PoseSample> poses_;
+    std::unordered_map<GridKey, GridCell, GridKeyHash> grid_;
+    sensor_msgs::PointCloud2ConstPtr pending_;
+    ros::WallTime pending_received_;
+    ros::Time last_received_, last_processed_, last_fused_;
+    Eigen::Vector2d last_position_ = Eigen::Vector2d::Zero();
+    double last_yaw_ = 0;
+    bool have_fused_ = false;
 
-    std::unordered_map<GridKey, GridCell, GridKeyHash> global_map_;
-    std::mutex map_mutex_;
-
-    double resolution_;
-    double view_range_;
-    int img_size_;
-    int num_classes_;
-    std::vector<std::string> class_names_;
-
-    bool has_odom_;
-    Eigen::Vector3d cur_pos_;
-    double cur_yaw_;
-    Eigen::Isometry3d cur_pose_mat_;
-
+    bool certain() const { return config_.bev_mode == sem_loc::BevMode::Certain; }
+    GridKey key(double x, double y) const {
+        return {static_cast<int>(std::floor(x / resolution_ + 1e-9)), static_cast<int>(std::floor(y / resolution_ + 1e-9))};
+    }
+    void resetAccumulation() {
+        grid_.clear();
+        have_fused_ = false;
+        last_processed_ = ros::Time();
+    }
     void odomCb(const nav_msgs::OdometryConstPtr& msg) {
-        cur_pos_.x() = msg->pose.pose.position.x;
-        cur_pos_.y() = msg->pose.pose.position.y;
-        cur_pos_.z() = msg->pose.pose.position.z;
-
-        Eigen::Quaterniond q(
-            msg->pose.pose.orientation.w,
-            msg->pose.pose.orientation.x,
-            msg->pose.pose.orientation.y,
-            msg->pose.pose.orientation.z
-        );
-
-        cur_pose_mat_ = Eigen::Isometry3d::Identity();
-        cur_pose_mat_.rotate(q);
-        cur_pose_mat_.pretranslate(cur_pos_);
-
-        // 提取 Yaw
-        double siny_cosp = 2 * (q.w() * q.z() + q.x() * q.y());
-        double cosy_cosp = 1 - 2 * (q.y() * q.y() + q.z() * q.z());
-        cur_yaw_ = std::atan2(siny_cosp, cosy_cosp);
-
-        has_odom_ = true;
+        Eigen::Quaterniond q(msg->pose.pose.orientation.w, msg->pose.pose.orientation.x,
+                             msg->pose.pose.orientation.y, msg->pose.pose.orientation.z);
+        Eigen::Vector3d position(msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z);
+        if (msg->header.stamp.isZero() || msg->header.frame_id.empty() || !position.allFinite() ||
+            !q.coeffs().allFinite() || q.norm() < 1e-6) {
+            ROS_WARN_THROTTLE(2.0, "BEV: invalid odometry timestamp/frame/pose");
+            return;
+        }
+        if (!poses_.empty() && (poses_.back().frame != msg->header.frame_id ||
+            (poses_.back().stamp - msg->header.stamp).toSec() > 0.5)) {
+            poses_.clear();
+            resetAccumulation();
+        }
+        PoseSample sample;
+        sample.stamp = msg->header.stamp;
+        sample.frame = msg->header.frame_id;
+        sample.pose.linear() = q.normalized().toRotationMatrix();
+        sample.pose.translation() = position;
+        auto it = std::lower_bound(poses_.begin(), poses_.end(), sample.stamp,
+            [](const PoseSample& p, const ros::Time& t) { return p.stamp < t; });
+        if (it != poses_.end() && it->stamp == sample.stamp) *it = sample;
+        else poses_.insert(it, sample);
+        while (poses_.size() > 400 || (poses_.size() > 1 &&
+               (poses_.back().stamp - poses_.front().stamp).toSec() > 3.0)) poses_.pop_front();
+        processPending();
     }
-
+    bool poseAt(const ros::Time& stamp, bool allow_nearest, PoseSample& out) const {
+        if (poses_.empty()) return false;
+        auto upper = std::lower_bound(poses_.begin(), poses_.end(), stamp,
+            [](const PoseSample& p, const ros::Time& t) { return p.stamp < t; });
+        if (upper != poses_.end() && upper->stamp == stamp) { out = *upper; return true; }
+        if (upper != poses_.begin() && upper != poses_.end()) {
+            const auto& a = *std::prev(upper);
+            const auto& b = *upper;
+            const double gap = (b.stamp - a.stamp).toSec();
+            if (gap <= 0.20 && a.frame == b.frame) {
+                const double t = (stamp - a.stamp).toSec() / gap;
+                out = a;
+                out.stamp = stamp;
+                out.pose.translation() = (1-t)*a.pose.translation() + t*b.pose.translation();
+                out.pose.linear() = Eigen::Quaterniond(a.pose.linear()).slerp(t,
+                    Eigen::Quaterniond(b.pose.linear())).normalized().toRotationMatrix();
+                return true;
+            }
+        }
+        if (!allow_nearest) return false;
+        auto nearest = upper == poses_.end() ? std::prev(poses_.end()) : upper;
+        if (upper != poses_.begin() && std::abs((std::prev(upper)->stamp-stamp).toSec()) <
+            std::abs((nearest->stamp-stamp).toSec())) nearest = std::prev(upper);
+        if (std::abs((nearest->stamp-stamp).toSec()) > 0.03) return false;
+        out = *nearest;
+        out.stamp = stamp;
+        return true;
+    }
     void cloudCb(const sensor_msgs::PointCloud2ConstPtr& msg) {
-        if (!has_odom_) return;
-
-        pcl::PointCloud<PointXYZIRGBLabelCurvature>::Ptr cloud(new pcl::PointCloud<PointXYZIRGBLabelCurvature>);
-        pcl::fromROSMsg(*msg, *cloud);
-
-        if (cloud->empty()) return;
-
-        pcl::PointCloud<PointXYZIRGBLabelCurvature>::Ptr cloud_world(new pcl::PointCloud<PointXYZIRGBLabelCurvature>);
-        // 这里会调用 cloud_in[i].data，现在结构体里有 data 了，所以编译能通过
-        pcl::transformPointCloud(*cloud, *cloud_world, cur_pose_mat_.matrix());
-
-        std::lock_guard<std::mutex> lock(map_mutex_);
-
-        for (const auto& pt : cloud_world->points) {
-            if (!pcl::isFinite(pt)) continue;
-
-            int u = static_cast<int>(std::floor(pt.x / resolution_));
-            int v = static_cast<int>(std::floor(pt.y / resolution_));
-            GridKey key = {u, v};
-
-            auto it = global_map_.find(key);
-            if (it == global_map_.end() || pt.z > it->second.z) {
-                GridCell cell;
-                cell.z = pt.z;
-                cell.label = pt.label;
-                cell.r = pt.r;
-                cell.g = pt.g;
-                cell.b = pt.b;
-                global_map_[key] = cell;
-            }
+        if (msg->header.stamp.isZero()) {
+            ROS_WARN_THROTTLE(2.0, "BEV: cloud requires a nonzero timestamp");
+            return;
         }
+        if (msg->header.stamp < last_received_) resetAccumulation();
+        last_received_ = msg->header.stamp;
+        if (msg->header.stamp == last_processed_) return;
+        pending_ = msg;
+        pending_received_ = ros::WallTime::now();
+        processPending();
     }
-
-    void timerRenderCb(const ros::TimerEvent&) {
-        if (!has_odom_ || global_map_.empty()) return;
-
-        std::lock_guard<std::mutex> lock(map_mutex_);
-
-        // 1. 清理过远的旧地图点
-        int cx = static_cast<int>(cur_pos_.x() / resolution_);
-        int cy = static_cast<int>(cur_pos_.y() / resolution_);
-        int cleanup_dist = static_cast<int>(img_size_ * 1.5);
-
-        for (auto it = global_map_.begin(); it != global_map_.end(); ) {
-            if (std::abs(it->first.u - cx) > cleanup_dist || std::abs(it->first.v - cy) > cleanup_dist) {
-                it = global_map_.erase(it);
-            } else {
-                ++it;
+    void timerCb(const ros::WallTimerEvent&) { processPending(); }
+    void processPending() {
+        if (!pending_) return;
+        const bool expired = (ros::WallTime::now() - pending_received_).toSec() >= 0.05;
+        PoseSample pose;
+        if (!poseAt(pending_->header.stamp, expired, pose)) {
+            if (expired) {
+                ROS_WARN_THROTTLE(2.0, "BEV: no time-matched odometry; dropping cloud");
+                pending_.reset();
+            }
+            return;
+        }
+        auto cloud = pending_;
+        pending_.reset();
+        if (config_.input_cloud_in_world && cloud->header.frame_id != pose.frame) {
+            ROS_ERROR_THROTTLE(2.0, "BEV: world cloud frame must equal odometry parent frame");
+            return;
+        }
+        integrate(*cloud, pose);
+    }
+    bool readProbabilities(const sensor_msgs::PointCloud2& msg, std::vector<std::array<float,3>>& result) const {
+        auto f = std::find_if(msg.fields.begin(), msg.fields.end(),
+            [](const sensor_msgs::PointField& field) { return field.name == "merged_probs"; });
+        if (f == msg.fields.end() || f->datatype != sensor_msgs::PointField::FLOAT32 || f->count != 3 ||
+            f->offset + 12 > msg.point_step || msg.is_bigendian ||
+            uint64_t(msg.width)*msg.point_step > msg.row_step ||
+            uint64_t(msg.row_step)*msg.height > msg.data.size()) {
+            ROS_ERROR_THROTTLE(2.0, "BEV: requires valid little-endian FLOAT32 merged_probs[3]");
+            return false;
+        }
+        result.resize(static_cast<size_t>(msg.width)*msg.height);
+        for (size_t r=0; r<msg.height; ++r) for (size_t c=0; c<msg.width; ++c) {
+            std::array<float,3> input;
+            std::memcpy(input.data(), msg.data.data()+r*msg.row_step+c*msg.point_step+f->offset, 12);
+            if (!std::all_of(input.begin(), input.end(), [](float p) { return std::isfinite(p) && p>=-1e-6f && p<=1.000001f; })) {
+                ROS_ERROR_THROTTLE(2.0, "BEV: invalid semantic probabilities");
+                return false;
+            }
+            for (int k=0;k<3;++k) result[r*msg.width+c][k] = std::clamp(input[config_.probability_channels[k]],0.f,1.f);
+        }
+        return true;
+    }
+    void integrate(const sensor_msgs::PointCloud2& msg, const PoseSample& sample) {
+        if (certain()) {
+            const auto label = std::find_if(msg.fields.begin(),msg.fields.end(),
+                [](const sensor_msgs::PointField& f) { return f.name=="label"; });
+            if (label==msg.fields.end() || label->datatype!=sensor_msgs::PointField::UINT32 ||
+                label->count!=1 || label->offset+4>msg.point_step ||
+                uint64_t(msg.width)*msg.point_step>msg.row_step || uint64_t(msg.row_step)*msg.height>msg.data.size()) {
+                ROS_ERROR_THROTTLE(2.0,"BEV: certain mode requires a valid UINT32 label field");
+                return;
             }
         }
-
-        // 2. 准备画布
-        int hs = img_size_ / 2;
-        int sr = static_cast<int>(hs * 1.5);
-        int side = sr * 2;
-
-        cv::Mat canvas_rgb = cv::Mat::zeros(side, side, CV_8UC3);
-        // CV_8UC1 默认初始化为0
-        std::vector<cv::Mat> canvas_masks(num_classes_);
-        for(int i=0; i<num_classes_; ++i) canvas_masks[i] = cv::Mat::zeros(side, side, CV_8UC1);
-
-        // 3. 填充画布
-        for (const auto& kv : global_map_) {
-            int local_u = kv.first.u - cx + sr;
-            int local_v = sr - (kv.first.v - cy);
-
-            if (local_u >= 0 && local_u < side && local_v >= 0 && local_v < side) {
-                const auto& cell = kv.second;
-
-                // RGB 用于显示，还是保持 0-255
-                canvas_rgb.at<cv::Vec3b>(local_v, local_u) = cv::Vec3b(cell.b, cell.g, cell.r);
-
-                // 生成 Mask 矩阵里只有 0 和 1
-                if (cell.label < static_cast<uint32_t>(num_classes_)) {
-                    canvas_masks[cell.label].at<uint8_t>(local_v, local_u) = 1;
+        std::vector<std::array<float,3>> probs;
+        if (!certain() && !readProbabilities(msg, probs)) return;
+        pcl::PointCloud<SemanticPoint> input, world;
+        pcl::fromROSMsg(msg, input);
+        if (config_.input_cloud_in_world) world = std::move(input);
+        else pcl::transformPointCloud(input, world, sample.pose.matrix());
+        const Eigen::Vector2d position = sample.pose.translation().head<2>();
+        const double yaw = std::atan2(sample.pose.linear()(1,0),sample.pose.linear()(0,0));
+        const double dyaw = std::abs(std::atan2(std::sin(yaw-last_yaw_),std::cos(yaw-last_yaw_)));
+        const bool fuse = !have_fused_ || (position-last_position_).norm() >= config_.accumulation_distance ||
+            dyaw >= config_.accumulation_yaw * M_PI/180 ||
+            (msg.header.stamp-last_fused_).toSec() >= config_.accumulation_interval;
+        const GridKey center = key(position.x(),position.y());
+        if (fuse) {
+            struct FrameCell { float top = -std::numeric_limits<float>::infinity(); std::vector<size_t> indices; };
+            std::unordered_map<GridKey,FrameCell,GridKeyHash> frame;
+            for (size_t i=0;i<world.size();++i) {
+                const auto& point = world[i];
+                if (!pcl::isFinite(point)) continue;
+                const auto k = key(point.x,point.y);
+                if (std::abs(k.x-center.x)>radius_ || std::abs(k.y-center.y)>radius_) continue;
+                auto& cell=frame[k];
+                cell.top=std::max(cell.top,point.z);
+                cell.indices.push_back(i);
+            }
+            for (const auto& entry : frame) {
+                CellObservation observation;
+                int count=0;
+                for (size_t i : entry.second.indices) {
+                    const auto& point=world[i];
+                    if (point.z < entry.second.top-config_.surface_band) continue;
+                    observation.votes[point.label<3 ? point.label : 3] += 1;
+                    if (!certain()) for (int c=0;c<3;++c) observation.probs[c] += probs[i][c];
+                    ++count;
                 }
+                for (float& v : observation.votes) v/=count;
+                for (float& v : observation.probs) v/=count;
+                auto& cell = grid_[entry.first];
+                auto& history = cell.history;
+                history.push_back(observation);
+                while (history.size()>static_cast<size_t>(config_.history_frames)) history.pop_front();
+                cell.refresh(); // 只更新本帧观测到的格子，其他格子复用统计缓存。
+            }
+            last_fused_=msg.header.stamp;
+            last_position_=position;
+            last_yaw_=yaw;
+            have_fused_=true;
+        }
+        // 地图按空间窗口保留，与观测年龄无关；每格的样本数只约束融合内存。
+        for (auto it=grid_.begin();it!=grid_.end();) {
+            if (std::abs(it->first.x-center.x)>radius_ || std::abs(it->first.y-center.y)>radius_)
+                it=grid_.erase(it);
+            else ++it;
+        }
+        last_processed_=msg.header.stamp;
+        render(sample,msg.header.stamp,yaw);
+    }
+    void render(const PoseSample& pose, const ros::Time& stamp, double yaw) {
+        cv::Mat output=cv::Mat::zeros(size_,size_,certain()?CV_8UC4:CV_32FC(5));
+        const double c=std::cos(yaw), s=std::sin(yaw);
+        // 从每个输出像素反查 world 栅格：用连续车位，不再整格截断中心或重复旋转旧图。
+        for (int row=0;row<size_;++row) for (int col=0;col<size_;++col) {
+            const double forward=(size_/2-row)*resolution_, left=(size_/2-col)*resolution_;
+            const auto k=key(pose.pose.translation().x()+c*forward-s*left,
+                             pose.pose.translation().y()+s*forward+c*left);
+            auto it=grid_.find(k);
+            if (it==grid_.end()) continue;
+            const auto& cell=it->second;
+            if (certain()) {
+                auto& pixel=output.at<cv::Vec4b>(row,col);
+                if (cell.label<3) pixel[cell.label]=1;
+                pixel[3]=1;
+            } else {
+                auto& pixel=output.at<cv::Vec<float,5>>(row,col);
+                for (int i=0;i<3;++i) pixel[i]=cell.probs[i];
+                pixel[3]=cell.entropy;
+                pixel[4]=1;
             }
         }
-
-        // 4. 旋转图像
-        double angle_deg = 90.0 - (cur_yaw_ * 180.0 / M_PI);
-        cv::Point2f center(sr, sr);
-        cv::Mat rot_mat = cv::getRotationMatrix2D(center, angle_deg, 1.0);
-
-        rot_mat.at<double>(0, 2) += (hs - sr);
-        rot_mat.at<double>(1, 2) += (hs - sr);
-
-        cv::Size dst_size(img_size_, img_size_);
-
-        // 生成最终 RGB 图 (用于显示)
-        cv::Mat img_rgb_final;
-        cv::warpAffine(canvas_rgb, img_rgb_final, rot_mat, dst_size, cv::INTER_LINEAR);
-
-        // 发布 RGB (只是给人看的，无所谓)
         std_msgs::Header header;
-        header.stamp = ros::Time::now();
-        header.frame_id = "base_link";
-        pub_rgb_.publish(cv_bridge::CvImage(header, "bgr8", img_rgb_final).toImageMsg());
-
-        // 5. 生成并发布各类 Mask (合并为一个包含所有 mask 的话题)
-
-        // 合并所有 mask 到一个多通道图像
-        cv::Mat combined_mask_src;
-        cv::merge(canvas_masks, combined_mask_src);
-
-        cv::Mat combined_mask_final;
-        // 使用最近邻插值，保证结果仍然是纯粹的 0 和 1
-        cv::warpAffine(combined_mask_src, combined_mask_final, rot_mat, dst_size, cv::INTER_NEAREST);
-
-        // 发布合并后的 mask (3通道, bgr8)
-        // 注意：数据本身是 0/1，在 ROS 图像查看器中看起来可能是全黑的。
-        // 但这是作为数据传输最准确的方式。
-        pub_all_masks_.publish(cv_bridge::CvImage(header, sensor_msgs::image_encodings::TYPE_8UC3, combined_mask_final).toImageMsg());
-
-        // 6. 可视化 (用于调试监控)
-        std::vector<cv::Mat> display_list;
-
-        // 可视化列表加入 RGB
-        cv::Mat vis_rgb = img_rgb_final.clone();
-        cv::putText(vis_rgb, "RGB View", cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 1);
-        display_list.push_back(vis_rgb);
-
-        // 将合并后的 mask 拆分出来进行可视化
-        std::vector<cv::Mat> final_masks_split;
-        cv::split(combined_mask_final, final_masks_split);
-
-        for (int i = 0; i < num_classes_; ++i) {
-            // 可视化处理：转彩色并增强亮度
-            cv::Mat vis_mask;
-
-            // 转为彩色 (此时值还是0和1)
-            cv::cvtColor(final_masks_split[i], vis_mask, cv::COLOR_GRAY2BGR);
-
-            // 乘以 255，让 1 变成 255 (纯亮)，这样人眼才能看见
-            vis_mask = vis_mask * 255;
-
-            // 打上标签文字
-            std::string label_txt = "Class " + std::to_string(i);
-            if (i < class_names_.size()) {
-                label_txt += ": " + class_names_[i];
-            }
-            // 文字用绿色画
-            cv::putText(vis_mask, label_txt, cv::Point(10, 20), cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 1);
-
-            display_list.push_back(vis_mask);
+        header.stamp=stamp;
+        header.frame_id="base_link";
+        pub_semantic_.publish(cv_bridge::CvImage(header,certain()?"8UC4":"32FC5",output).toImageMsg());
+        if (!config_.visualize) return;
+        std::vector<cv::Mat> channels,views;
+        cv::split(output,channels);
+        const std::vector<std::string> names=certain()?std::vector<std::string>{"road","building","plant","mask"}
+            :std::vector<std::string>{"road","building","plant","entropy","mask"};
+        for (size_t i=0;i<channels.size();++i) {
+            cv::Mat image,heat;
+            channels[i].convertTo(image,CV_8U,255);
+            cv::applyColorMap(image,heat,cv::COLORMAP_JET);
+            cv::putText(heat,names[i],cv::Point(10,20),cv::FONT_HERSHEY_SIMPLEX,0.6,cv::Scalar(255,255,255));
+            views.push_back(heat);
         }
-
-        // OpenCV 窗口显示 (只要有数据就显示)
-        if (!display_list.empty()) {
-            cv::Mat combined;
-            cv::hconcat(display_list, combined);
-
-            // 如果图太宽，缩放一下，不然屏幕放不下
-            // 调整为 0.75 (原来0.5)，并允许手动调整窗口
-            if (combined.cols > 1920) {
-                cv::resize(combined, combined, cv::Size(), 0.75, 0.75);
-            }
-
-            cv::namedWindow("BEV Mapper Monitor", cv::WINDOW_NORMAL);
-            cv::imshow("BEV Mapper Monitor", combined);
-            cv::waitKey(1);
-        }
+        cv::Mat display;
+        cv::hconcat(views,display);
+        if (display.cols>1920) cv::resize(display,display,cv::Size(),0.75,0.75);
+        cv::imshow("BEV Mapper Monitor",display);
+        cv::waitKey(1);
     }
 };
 
-int main(int argc, char** argv) {
-    ros::init(argc, argv, "visual_bev_mapper_node");
-    VisualBevMapper mapper;
-    ros::spin();
-    return 0;
+// 上游日志只给 poll 返回值 -1；补充当前 errno，便于定位持续通信错误。
+class XmlRpcPollDiagnostics : public XmlRpc::XmlRpcErrorHandler {
+public:
+    XmlRpcPollDiagnostics() : previous_(getErrorHandler()) { setErrorHandler(this); }
+    ~XmlRpcPollDiagnostics() override { setErrorHandler(previous_); }
+    void error(const char* message) override {
+        const int saved_errno = errno;
+        if (std::strstr(message, "XmlRpcDispatch::work: error in poll")) {
+            // XML-RPC 启动早于 ROS 日志/时间初始化，直接报告以免漏掉首次错误。
+            std::fprintf(stderr, "[BEV XML-RPC] %s errno=%d (%s)\n",
+                         message, saved_errno, std::strerror(saved_errno));
+        } else {
+            previous_->error(message);
+        }
+        errno = saved_errno;
+    }
+private:
+    XmlRpc::XmlRpcErrorHandler* previous_;
+};
+
+int main(int argc,char** argv) {
+    ros::init(argc,argv,"visual_bev_mapper_node");
+    XmlRpcPollDiagnostics xmlrpc_diagnostics;
+    try {
+        VisualBevMapper mapper(sem_loc::LoadConfig(std::string(SEM_LOC_SOURCE_DIR)+"/config/sem_loc.yaml"));
+        ros::spin();
+        ros::shutdown();
+    } catch (const std::exception& error) {
+        std::cerr << "[BEV] Startup failed: " << error.what() << std::endl;
+        ros::shutdown();
+        return 1;
+    }
 }

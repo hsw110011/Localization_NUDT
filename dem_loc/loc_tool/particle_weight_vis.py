@@ -21,7 +21,7 @@ def _require_cv2():
 
 def _weight_to_bgr(weight_norm):
     """Map 0..1 to blue..red in OpenCV BGR order."""
-    t = float(np.clip(weight_norm, 0.0, 1.0))
+    t = max(0.0, min(1.0, float(weight_norm)))
     return int(round(255.0 * (1.0 - t))), 0, int(round(255.0 * t))
 
 

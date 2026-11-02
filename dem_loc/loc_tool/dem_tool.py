@@ -29,6 +29,7 @@ class DemTiffData:
     min_height: float = 0.0
     max_height: float = 0.0
     zone_num: int = 0
+    utm_geotransform: tuple = ()
     is_valid: bool = False
 
 
@@ -72,17 +73,36 @@ def load_dem_tiff(tiff_path, map_resolution_m=DEM_MAP_RESOLUTION_M):
         spatial_ref = osr.SpatialReference()
         if not projection or spatial_ref.ImportFromWkt(projection) != 0:
             raise RuntimeError("GeoTIFF CRS is missing or invalid")
-        if not spatial_ref.IsGeographic():
-            raise RuntimeError("GeoTIFF must use geographic WGS84 coordinates")
         if (
             abs(float(spatial_ref.GetSemiMajor()) - 6378137.0) > 1e-3
             or abs(float(spatial_ref.GetInvFlattening()) - 298.257223563) > 1e-9
         ):
-            raise RuntimeError("GeoTIFF geographic CRS must use the WGS84 ellipsoid")
+            raise RuntimeError("GeoTIFF CRS must use the WGS84 ellipsoid")
+
+        if spatial_ref.IsProjected():
+            zone = spatial_ref.GetUTMZone()
+            if not zone:
+                raise RuntimeError("projected GeoTIFF must use WGS84 / UTM coordinates")
+            if map_resolution_m and float(map_resolution_m) > 0.0:
+                dataset = gdal.Warp(
+                    "", dataset, format="MEM", dstSRS=projection,
+                    xRes=float(map_resolution_m), yRes=float(map_resolution_m),
+                    resampleAlg=gdal.GRA_Bilinear, outputType=gdal.GDT_Float32,
+                    dstNodata=float("nan"),
+                )
+                if dataset is None:
+                    raise RuntimeError("failed to resample UTM GeoTIFF: {}".format(tiff_path))
+                width = int(dataset.RasterXSize)
+                height = int(dataset.RasterYSize)
+                geotransform = dataset.GetGeoTransform()
+            out_data.utm_geotransform = tuple(geotransform)
+            out_data.zone_num = abs(zone)
+            out_data.resolution = float(geotransform[1])
+        elif not spatial_ref.IsGeographic():
+            raise RuntimeError("GeoTIFF must use WGS84 geographic or UTM coordinates")
 
         out_data.resolution_x = float(geotransform[1])
         out_data.resolution_y = abs(float(geotransform[5]))
-        out_data.resolution = 0.0
 
         min_lon = float(geotransform[0])
         max_lat = float(geotransform[3])
@@ -90,8 +110,23 @@ def load_dem_tiff(tiff_path, map_resolution_m=DEM_MAP_RESOLUTION_M):
         min_lat = max_lat + height * float(geotransform[5])
         out_data.geo_bounds = [min_lon, max_lat, max_lon, min_lat]
 
-        center_lon = (min_lon + max_lon) / 2.0
-        out_data.zone_num = int((center_lon + 180.0) / 6.0) + 1
+        if out_data.utm_geotransform:
+            wgs84 = spatial_ref.CloneGeogCS()
+            spatial_ref.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            wgs84.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            to_wgs84 = osr.CoordinateTransformation(spatial_ref, wgs84)
+            corners = to_wgs84.TransformPoints([
+                (x, y) for x in (min_lon, max_lon) for y in (min_lat, max_lat)
+            ])
+            out_data.geo_bounds = [
+                min(p[0] for p in corners), max(p[1] for p in corners),
+                max(p[0] for p in corners), min(p[1] for p in corners),
+            ]
+            out_data.resolution_x = (out_data.geo_bounds[2] - out_data.geo_bounds[0]) / width
+            out_data.resolution_y = (out_data.geo_bounds[1] - out_data.geo_bounds[3]) / height
+        else:
+            center_lon = (min_lon + max_lon) / 2.0
+            out_data.zone_num = int((center_lon + 180.0) / 6.0) + 1
 
         band = dataset.GetRasterBand(1)
         if band is None:
@@ -122,13 +157,9 @@ def load_dem_tiff(tiff_path, map_resolution_m=DEM_MAP_RESOLUTION_M):
         out_data.visual_map = cv2.applyColorMap(gray_map, cv2.COLORMAP_JET)
         out_data.is_valid = True
 
-        if map_resolution_m and float(map_resolution_m) > 0.0:
+        if not out_data.utm_geotransform and map_resolution_m and float(map_resolution_m) > 0.0:
             resample_dem_to_gauss_resolution(out_data, float(map_resolution_m))
 
-        return out_data
-
-    except Exception as exc:
-        out_data.is_valid = False
         return out_data
 
     finally:

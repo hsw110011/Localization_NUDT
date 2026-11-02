@@ -1,0 +1,14 @@
+<launch>
+  <arg name="input_topic" default="/lidar_bev/grid_map" />
+  <arg name="height_min" default="-2.0" />
+  <arg name="height_max" default="2.0" />
+  <arg name="rate_hz" default="5.0" />
+  <node pkg="lio_bev" type="height_viewer.py" name="lio_bev_height_viewer" output="screen">
+    <env name="OPENBLAS_NUM_THREADS" value="1" />
+    <env name="OMP_NUM_THREADS" value="1" />
+    <param name="input_topic" value="$(arg input_topic)" />
+    <param name="height_min" value="$(arg height_min)" />
+    <param name="height_max" value="$(arg height_max)" />
+    <param name="rate_hz" value="$(arg rate_hz)" />
+  </node>
+</launch>
